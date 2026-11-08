@@ -122,10 +122,11 @@ class ScreenHelpersTest(unittest.TestCase):
 
     def test_turn_star_buckets(self):
         self.assertEqual(p.CSV_HEADER[2:4], ["一级行业", "二级行业"])
-        self.assertEqual(p.CSV_HEADER[16], "分位星级")
-        self.assertEqual(len(p.CSV_HEADER), 24)
-        self.assertEqual(p.CSV_HEADER[17:], ["最新收盘价", "PE", "PB", "PS",
-                                              "DCF合理价", "DCF空间%", "DCF说明"])
+        self.assertEqual(p.CSV_HEADER[15], "分位星级")
+        self.assertEqual(len(p.CSV_HEADER), 20)
+        self.assertEqual(p.CSV_HEADER[16:], ["最新收盘价", "PE", "PB", "PS"])
+        self.assertNotIn("订单增长", p.CSV_HEADER)
+        self.assertFalse(any(h.startswith("DCF") for h in p.CSV_HEADER))
         self.assertEqual(turn_star(0), "***")
         self.assertEqual(turn_star(19.9), "***")
         self.assertEqual(turn_star(20), "**")
@@ -464,22 +465,7 @@ class DownloadHistoryHelpersTest(unittest.TestCase):
 
 
 class ValuationTest(unittest.TestCase):
-    """PS / DCF 估值列：纯函数、不联网。"""
-
-    @staticmethod
-    def annual(fcf, rev, years=5):
-        return [{"EndDate": f"{2021 + i}-12-31", "FCFF": fcf,
-                 "OperatingRevenue": rev} for i in range(years)]
-
-    def test_dcf_flat_revenue(self):
-        # FCF0=100、营收零增长（g1=0）、r=9%、g=2.5%、n=10
-        #   EV = 100×(1−1.09⁻¹⁰)/0.09 + 100×1.025/0.065/1.09¹⁰ = 1307.88
-        rows = self.annual(100, 1000)
-        q = {"total_shares": 1000, "price": 1.0}
-        d = valuation_metrics(rows, [], q)
-        self.assertEqual(d["fair"], 1.31)
-        self.assertEqual(d["margin_pct"], 23.5)
-        self.assertEqual(d["note"], "")
+    """PS 估值列：纯函数、不联网。"""
 
     def test_ps_uses_latest_period_only(self):
         rows = [{"EndDate": "2025-06-30", "OperatingRevenueTTM": 1e8},
@@ -492,30 +478,11 @@ class ValuationTest(unittest.TestCase):
         d = valuation_metrics(rows, [], {"total_market_cap": 5e9})
         self.assertEqual(d["ps"], 5.0)
 
-    def test_not_applicable_reasons(self):
-        q = {"total_shares": 1000, "price": 1.0}
-        d = valuation_metrics(self.annual(-5, 1000), [], q)
-        self.assertEqual(d["note"], "自由现金流≤0")
-        self.assertIsNone(d["fair"])        # 不适用时不给数
-        self.assertIsNone(d["margin_pct"])
-        self.assertEqual(valuation_metrics(self.annual(100, 1000, years=4),
-                                              [], q)["note"], "年报不足5年")
-        fin = [{"EndDate": "2025-12-31", "FCFF": 100,
-                "OperatingRevenue": 1000, "EnterpriseType": "证券公司"}]
-        d = valuation_metrics(fin, [], q)
-        self.assertEqual(d["note"], "金融股不适用")
-        self.assertIsNone(d["fair"])
-        self.assertIsNone(d["ps"])          # 金融股 PS 也不适用
-
-    def test_cagr_clamped(self):
-        # 营收 5 年 4 倍 → CAGR 41%，夹到 15%，估值应高于零增长
-        flat = valuation_metrics(self.annual(100, 1000), [],
-                                    {"total_shares": 1000, "price": 1.0})
-        grow = valuation_metrics(
-            [{"EndDate": f"{2021+i}-12-31", "FCFF": 100,
-              "OperatingRevenue": 1000 * 4 ** (i / 4)} for i in range(5)],
-            [], {"total_shares": 1000, "price": 1.0})
-        self.assertGreater(grow["fair"], flat["fair"])
+    def test_financial_ps_not_applicable(self):
+        rows = [{"EndDate": "2025-12-31", "OperatingRevenueTTM": 1e9,
+                 "EnterpriseType": "证券公司"}]
+        d = valuation_metrics(rows, [], {"total_market_cap": 5e9})
+        self.assertIsNone(d["ps"])
 
     def test_csv_row(self):
         x = {"code": "sh600000", "name": "浦发银行", "d_star": "2026-11-02",
@@ -524,24 +491,21 @@ class ValuationTest(unittest.TestCase):
              "turn_p1": "是", "turn_gm": "毛利率 20%", "turn_p2": "无数据",
              "turn_p3": "否", "health_text": "正常：四项未触发",
              "turn20": 1.5, "turn20_rank": 12.3,
-             "price": 7.491, "pe": -25.06, "pb": 2.65, "ps": 4.3,
-             "dcf_fair": 8.9, "dcf_margin": -67.9, "dcf_note": ""}
+             "price": 7.491, "pe": -25.06, "pb": 2.65, "ps": 4.3}
         row = csv_row(x)
         self.assertEqual(len(row), len(p.CSV_HEADER))
+        self.assertEqual(len(row), 20)
         self.assertEqual(row[2:4], ["银行", "股份制银行Ⅱ"])
         self.assertEqual(row[6], 3.14)
-        self.assertEqual(row[17:24], [7.49, -25.06, 2.65, 4.3, 8.9, -67.9, ""])
-        # 不适用：数值列留空、说明列给原因
-        na = dict(x, dcf_fair=None, dcf_margin=None,
-                  dcf_note="自由现金流≤0")
-        self.assertEqual(csv_row(na)[21:24], ["", "", "自由现金流≤0"])
+        self.assertEqual(row[10], "是：毛利率 20%")
+        self.assertEqual(row[11], "否")
+        self.assertEqual(row[16:], [7.49, -25.06, 2.65, 4.3])
         # 缺字段时不能崩：行业列记「未分类」，估值列留空
         bare = dict(x)
-        for k in ("price", "pe", "pb", "ps", "dcf_fair", "dcf_margin", "dcf_note",
-                  "sw1", "sw2"):
+        for k in ("price", "pe", "pb", "ps", "sw1", "sw2"):
             bare.pop(k)
         self.assertEqual(csv_row(bare)[2:4], ["未分类", "未分类"])
-        self.assertEqual(csv_row(bare)[17:24], ["", "", "", "", "", "", ""])
+        self.assertEqual(csv_row(bare)[16:], ["", "", "", ""])
 
 
 class IndustryMapTest(unittest.TestCase):

@@ -8,7 +8,7 @@ from .pipeline import CliError, run
 
 
 def build_parser():
-    ap = argparse.ArgumentParser(description="K线选股规则 v1.7（每周选股，K=5）")
+    ap = argparse.ArgumentParser(description="K线选股规则 v1.8（每周选股，K=5）")
     ap.add_argument("--date", help="基准交易日（默认最近交易日）")
     ap.add_argument("--n", type=int, default=4,
                     help="新鲜度窗口，必须 = 扫描周期−1（每周 K=5 用 4=默认；"

@@ -15,6 +15,34 @@
 
 ---
 
+## 2026-11-08 19:30 +08:00
+
+### 删除
+
+- CSV 删除 4 列，列数由 24 变 **20**：
+  - 删除「订单增长」列；订单增长仍照常计算，保留在 `result_*.json` 的名单字段和终端摘要中；
+  - 删除「DCF合理价 / DCF空间% / DCF说明」三列，并删除后台 DCF 计算：
+    `valuation.py` 只保留 PS，`params.py` 删除 `DCF_*` 常量，
+    `statements.py` 删除仅供 DCF 使用的 `annual_rows()`；
+  - `annotate.py` 不再写入 `dcf_fair / dcf_margin / dcf_note`，`result_*.json` 新结果不再包含这些字段。
+- 版本号由 v1.7 升到 **v1.8**（`--help` 与 `result_*.json` 的「版本」）。
+
+### 修改
+
+- `CSV_HEADER`、`csv_row()` 与相关测试同步为 20 列；估值改为 4 列（收盘价 / PE / PB / PS）。
+- `tests/test_screen.py` 删除 3 个 DCF 测试，新增 1 个「金融股 PS 不适用」测试，
+  测试总数 53 → 51。
+- `README.md` 更新列清单、估值说明、版本号、测试数量，并注明历史 CSV 不自动回写。
+
+### 影响
+
+- 选股规则、名单构成、换手过滤、业绩转变判断和财务健康提示均未改变。
+- 新生成的 CSV 为 20 列；`csv_output/` 下的历史 CSV 仍是 24 列，不自动改写。
+- 「订单增长」仍可在 `result_*.json` 和终端摘要中查看，只是不再出现在 CSV。
+- DCF 相关数据不再产出；如需恢复，需从 Git 历史取回 `valuation.py` 的 DCF 逻辑与三列定义。
+
+---
+
 ## 2026-11-08 15:39 +08:00
 
 ### 修改

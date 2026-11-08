@@ -31,10 +31,3 @@ def _stmt_annual(rows, day, n=3):
              and end_date(r).endswith("-12-31")]
     valid.sort(key=end_date)
     return valid[-n:]
-
-
-def annual_rows(rows):
-    """只取年报（EndDate 为 12-31）并按报告期升序，供 DCF 用。"""
-    out = [r for r in (rows or []) if str(r.get("EndDate") or "")[5:10] == "12-31"]
-    out.sort(key=lambda r: str(r.get("EndDate")))
-    return out

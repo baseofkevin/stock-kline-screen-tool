@@ -38,22 +38,19 @@ def turn_cell(label, desc):
 
 
 def csv_row(x):
-    """一只入选股的 CSV 行，顺序与 CSV_HEADER 严格对应（24 列）。"""
+    """一只入选股的 CSV 行，顺序与 CSV_HEADER 严格对应（20 列）。"""
     return [
         x["code"], x.get("name") or "",
         x.get("sw1") or "未分类", x.get("sw2") or "未分类",
         x["d_star"], x["age"], round(x["vcross"], 2), x.get("chg"),
         x["r20"], x["r60"],
         turn_cell(x.get("turn_p1", ""), x.get("turn_gm", "")),
-        turn_cell(x.get("turn_p2", ""), x.get("turn_cl", "")),
         turn_cell(x.get("turn_p3", ""), x.get("turn_ocf", "")),
         x.get("health_text", ""),
         x.get("turn20"), x.get("turn20_rank"),
         turn_star(x.get("turn20_rank")),
         r2(x.get("price")), r2(x.get("pe")), r2(x.get("pb")),
         r2(x.get("ps")),
-        r2(x.get("dcf_fair")), r2(x.get("dcf_margin")),
-        x.get("dcf_note", ""),
     ]
 
 
@@ -64,7 +61,7 @@ def build_result(st):
     csv_path, res_path = st["csv_path"], st["res_path"]
     stats = dict(sorted(st["rej"].items(), key=lambda kv: -kv[1]))
     return {
-        "版本": "v1.7",
+        "版本": "v1.8",
         "基准日": st["S"], "扫描周期K": a.n + 1, "新鲜度窗口N": a.n,
         "覆盖区间": st["need"],
         "参数": {"K_VOL": a.k_vol, "涨幅区间": [a.chg_lo, a.chg_hi],

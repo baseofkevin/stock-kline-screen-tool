@@ -74,12 +74,12 @@ def _annotate_turnaround(st):
 def _annotate_valuation(st):
     S, final = st["S"], st["final"]
     q = st["q"]
-    # ---- 估值列（PS / DCF，只展示，不参与裁决）----
+    # ---- PS 估值列（只展示，不参与裁决；DCF 于 v1.8 删除）----
     # 财报数据直接复用 compute_turnaround 刚写下的缓存，不再发请求。
     rat_rows = jload(os.path.join(DB, f"finance_ratio_{S}.json"), {})
     bal_rows = jload(os.path.join(DB, f"finance_bal_{S}.json"), {})
     if final and not rat_rows:
-        print("      ⚠️ 财报缓存为空：PS / DCF 列留空（选股结果不受影响）",
+        print("      ⚠️ 财报缓存为空：PS 列留空（选股结果不受影响）",
               file=sys.stderr)
     for x in final:
         qx = q.get(x["code"]) or {}
@@ -87,9 +87,6 @@ def _annotate_valuation(st):
                                bal_rows.get(x["code"]) or [], qx)
         x["price"] = fnum(qx.get("price"))
         x["ps"] = vm["ps"]
-        x["dcf_fair"] = vm["fair"]
-        x["dcf_margin"] = vm["margin_pct"]
-        x["dcf_note"] = vm["note"]
 
 
 def _annotate_industry(st):
