@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+dist/
+build/
+*.egg-info/
+
+# 本项目生成的数据与结果（原始行情、选股 CSV、顶部观察 HTML）
+/database/
+/csv_output/
+/picks_log.csv
+/evaluation/picks_log.csv
+
+# 日志、临时文件与本地缓存
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+.cache/
+
+# 环境变量 / 密钥（如有）
+.env
+.env.*
+
+# 操作系统 / 编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Node.js（当前项目未使用，保留通用规则）
+node_modules/
+npm-debug.log*
