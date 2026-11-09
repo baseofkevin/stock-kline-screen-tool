@@ -76,8 +76,8 @@
 
 ### 修改
 
-- 选股入口脚本由 `screen_kline.py` 重命名为 `kline-screan.py`；同步更新当前代码与文档中的引用：
-  `README.md`、`kline-screan.py` 文件头、`kline_screen/cli.py` 与 `kline_screen/params.py` 注释、
+- 选股入口脚本由 `screen_kline.py` 重命名为 `kline_screen.py`；同步更新当前代码与文档中的引用：
+  `README.md`、`kline_screen.py` 文件头、`kline_screen/cli.py` 与 `kline_screen/params.py` 注释、
   `evaluation/evaluate.py` 报错提示、`evaluation/download_history.py` 注释、`tests/test_screen.py`
   的入口冒烟测试。`CHANGELOG.md` 中的历史记录保留当时的旧文件名，不改写历史。
 - 将 `K线选股规则说明书.md` 的全部内容并入 `README.md`：策略逻辑、完整规则、参数、数据源与数据陷阱、
@@ -91,7 +91,7 @@
 ### 影响
 
 - 选股规则、参数默认值、CSV 列、`result_*.json` 字段、缓存格式和评估口径均未改变。
-- 运行入口改为 `python3 kline-screan.py ...`；`evaluation/` 下两个脚本用法不变。
+- 运行入口改为 `python3 kline_screen.py ...`；`evaluation/` 下两个脚本用法不变。
 - 文档入口统一为 `README.md`；旧说明书中的规则内容未丢失，只是并入 README。
 
 ---
