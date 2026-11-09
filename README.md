@@ -8,7 +8,7 @@
 
 | 程序 | 作用 | 主要输出 |
 |---|---|---|
-| `kline-screan.py` | 按 K 线规则做周频选股 | `csv_output/选股_<基准日>.csv` + `database/result_<基准日>.json` |
+| `kline-screen.py` | 按 K 线规则做周频选股 | `csv_output/选股_<基准日>.csv` + `database/result_<基准日>.json` |
 | `evaluation/download_history.py` | 批量下载历史横截面、标签、K 线、市值数据 | `database/` 下的原始数据 |
 | `evaluation/evaluate.py` | 对历史名单做前向评估（5/10/20 日收益与超额） | 终端报表 + `evaluation/picks_log.csv` |
 
@@ -330,17 +330,17 @@ CSV 中业绩转变两列（毛利率改善、经营现金流）和财务健康�
 
 ```bash
 # 默认扫描最近交易日，K=5
-python3 kline-screan.py
+python3 kline-screen.py
 
 # 指定基准日
-python3 kline-screan.py --date 2026-10-14
+python3 kline-screen.py --date 2026-10-14
 
 # 强制重新下载原始数据
-python3 kline-screan.py --refresh
+python3 kline-screen.py --refresh
 
 # 换扫描周期（N 必须 = K−1）
-python3 kline-screan.py --n 2     # 每 3 个交易日
-python3 kline-screan.py --n 0     # 每个交易日
+python3 kline-screen.py --n 2     # 每 3 个交易日
+python3 kline-screen.py --n 0     # 每个交易日
 ```
 
 主要参数：
@@ -457,8 +457,8 @@ K 线规则回答「什么时候启动」，业绩转变回答「有没有出现
 ## 目录
 
 ```text
-stock-kline-screan-tool/
-├── kline-screan.py            周频选股入口（仅调度）
+stock-kline-screen-tool/
+├── kline-screen.py            周频选股入口（仅调度）
 ├── kline_screen/              选股实现（项目内部包）
 │   ├── cli.py                 命令行参数
 │   ├── pipeline.py            准备 / 粗筛 / 标签 / K线阶段
