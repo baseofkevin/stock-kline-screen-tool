@@ -1,13 +1,11 @@
-"""入选后的业绩、估值、行业标注与写盘。"""
+"""入选后的业绩转变、行业标注与写盘。"""
 import os
 import sys
 
 from .config import CSVDIR, DB
-from .common.storage import count_csv_rows, jdump, jload, write_csv_atomic
-from .common.values import fnum
+from .common.storage import count_csv_rows, jdump, write_csv_atomic
 from .datasources.industry import get_industry_map
 from .metrics.turnaround import compute_turnaround
-from .metrics.valuation import valuation_metrics
 from .output import build_result, csv_row
 from .params import CSV_HEADER
 
@@ -18,7 +16,7 @@ def _annotate_turnaround(st):
     turn, turn_failed = compute_turnaround(
         [x["code"] for x in final], S, a.refresh)
     if turn is None:
-        print("      ⚠️ 财务数据获取失败：「业绩转变」列留空（选股结果不受影响）",
+        print("      ⚠️ 财务数据获取失败：「毛利率改善」列留空（选股结果不受影响）",
               file=sys.stderr)
     elif turn_failed:
         print(f"      ⚠️ {len(turn_failed)} 只财务数据缺失，标「无数据」："
@@ -26,67 +24,24 @@ def _annotate_turnaround(st):
               file=sys.stderr)
     for x in final:
         if turn is None:
-            x.update({"turn_p1": "", "turn_p2": "", "turn_p3": "",
-                      "turn_detail": None,
-                      "turn_gm": "", "turn_cl": "", "turn_ocf": "",
-                      "health_label": "", "health_desc": "",
-                      "health_detail": None})
+            x.update({"turn_p1": "", "turn_detail": None, "turn_gm": ""})
             continue
         m = turn.get(x["code"])
         if m is None:
-            x.update({"turn_p1": "无数据", "turn_p2": "无数据",
-                      "turn_p3": "无数据", "turn_detail": None,
-                      "turn_gm": "", "turn_cl": "", "turn_ocf": "",
-                      "health_label": "数据不足",
-                      "health_desc": "财务数据缺失", "health_detail": None})
+            x.update({"turn_p1": "无数据", "turn_detail": None, "turn_gm": ""})
             continue
         x["turn_p1"] = m["p1_label"]
-        x["turn_p2"] = m["p2_label"]
-        x["turn_p3"] = m["p3_label"]
         x["turn_detail"] = m
         x["turn_gm"] = m.get("gm_desc") or ""
-        x["turn_cl"] = m.get("cl_desc") or ""
-        x["turn_ocf"] = m.get("ocf_desc") or ""
-        x["health_label"] = m.get("health_label") or ""
-        x["health_desc"] = m.get("health_desc") or ""
-        x["health_detail"] = m.get("health")
-    for x in final:
-        if x.get("health_label"):
-            x["health_text"] = (x["health_label"] + "：" +
-                                x.get("health_desc", "")) if x.get("health_desc") \
-                else x["health_label"]
-        else:
-            x["health_text"] = ""
     if turn is not None and final:
         order = ["是", "否", "无数据", "不适用"]
-        for key, name in (("turn_p1", "①毛利率环比改善"),
-                          ("turn_p2", "②合同负债/订单增长"),
-                          ("turn_p3", "③经营现金流")):
-            cnt = {}
-            for x in final:
-                v = x.get(key) or "无数据"
-                cnt[v] = cnt.get(v, 0) + 1
-            print(f"      {name}：" + " ｜ ".join(
-                f"{k} {cnt[k]} 只" for k in order if cnt.get(k)))
+        cnt = {}
+        for x in final:
+            v = x.get("turn_p1") or "无数据"
+            cnt[v] = cnt.get(v, 0) + 1
+        print("      ①毛利率环比改善：" + " ｜ ".join(
+            f"{k} {cnt[k]} 只" for k in order if cnt.get(k)))
     st.update({"turn": turn, "turn_failed": turn_failed})
-
-
-def _annotate_valuation(st):
-    S, final = st["S"], st["final"]
-    q = st["q"]
-    # ---- PS 估值列（只展示，不参与裁决；DCF 于 v1.8 删除）----
-    # 财报数据直接复用 compute_turnaround 刚写下的缓存，不再发请求。
-    rat_rows = jload(os.path.join(DB, f"finance_ratio_{S}.json"), {})
-    bal_rows = jload(os.path.join(DB, f"finance_bal_{S}.json"), {})
-    if final and not rat_rows:
-        print("      ⚠️ 财报缓存为空：PS 列留空（选股结果不受影响）",
-              file=sys.stderr)
-    for x in final:
-        qx = q.get(x["code"]) or {}
-        vm = valuation_metrics(rat_rows.get(x["code"]) or [],
-                               bal_rows.get(x["code"]) or [], qx)
-        x["price"] = fnum(qx.get("price"))
-        x["ps"] = vm["ps"]
 
 
 def _annotate_industry(st):

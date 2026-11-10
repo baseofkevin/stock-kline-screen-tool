@@ -2,11 +2,10 @@
 import datetime as dt
 import os
 import sys
-import time
 
-from .annotate import (_annotate_industry, _annotate_turnaround,
-                       _annotate_valuation, _write)
+from .annotate import _annotate_industry, _annotate_turnaround, _write
 from .config import CSVDIR, DB, W
+from .common.session import MARKET_CLOSE, session_final
 from .common.values import fnum
 from .datasources.kline import get_kline
 from .datasources.market import get_cross, get_labels, get_trading_days
@@ -29,7 +28,6 @@ def run(a):
     _select(st)
     _enrich_market(st)
     _annotate_turnaround(st)
-    _annotate_valuation(st)
     _annotate_industry(st)
     _write(st)
     print_summary(st)
@@ -49,7 +47,8 @@ def _prepare(st):
     os.makedirs(CSVDIR, exist_ok=True)
 
     print("[1/6] 交易日历 ...", flush=True)
-    today = time.strftime("%Y-%m-%d")
+    now = dt.datetime.now()
+    today = now.strftime("%Y-%m-%d")
     days = get_trading_days(today, a.refresh)
     if not days:
         raise CliError("错误：交易日历为空")
@@ -57,6 +56,17 @@ def _prepare(st):
     if S not in days:
         prev = max((d for d in days if d <= S), default=None)
         raise CliError(f"错误：基准日 {S} 不是交易日；最近交易日为 {prev or '无'}")
+    # 收盘前（含开盘前、盘中）直接拒绝：此时日 K 的收盘价、当日成交量、当日
+    # 成交额都还是半成品，而服务端仍会返回一份「当天」的粗筛名单，一旦被缓存
+    # 就会在收盘后被当成定稿数据复用，静默产出错名单（详见 common/session.py）。
+    if not session_final(S, now):
+        prev = max((d for d in days if d < S), default=None)
+        raise CliError(
+            f"错误：基准日 {S} 尚未收盘定稿"
+            f"（当前 {now:%Y-%m-%d %H:%M}，需 {MARKET_CLOSE:%H:%M} 之后）。\n"
+            f"      盘中运行时收盘价、量能倍数、换手%都还不完整，"
+            f"此时选股得到的名单不可信，因此直接终止。\n"
+            f"      请收盘后重跑，或改用 --date {prev or '上一交易日'}。")
     if a.chg_lo > a.chg_hi:
         raise CliError(f"错误：--chg-lo {a.chg_lo} > --chg-hi {a.chg_hi}")
     if not (0 <= a.turn_pct <= 1):

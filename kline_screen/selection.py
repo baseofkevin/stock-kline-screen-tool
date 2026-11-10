@@ -42,7 +42,7 @@ def _enrich_market(st):
     hit = st["hit"]
     print("[6/6] 取行情 / 计算换手与市值比 / 写结果 ...", flush=True)
     q = get_quotes([x["code"] for x in hit], S, a.refresh) if hit else {}
-    # ⚠️ 行情快照缺失会让 PE/PB/换手 等展示列空白；绝不能因此静默剔除。
+    # ⚠️ 行情快照缺失会让收盘价/换手等展示列空白；绝不能因此静默剔除。
     if hit:
         missing = [x["code"] for x in hit
                    if not cap_to_yuan(fnum((q.get(x["code"]) or {})
@@ -50,7 +50,7 @@ def _enrich_market(st):
         if missing:
             raise RuntimeError(
                 f"行情数据缺失 {len(missing)}/{len(hit)} 只（如 {missing[:5]}）。"
-                f"展示列（PE/PB/换手）无法填充，终止以免产出不可信名单。"
+                f"展示列（收盘价/换手）无法填充，终止以免产出不可信名单。"
                 f"可重跑一次或加 --refresh。")
     # ⚠️ 同上一道防线，但针对「启动日净流入」字段：字段缺失时市值比同样算不出来。
     #    典型成因是 CROSS_TPL 不再引用 MainNetFlow —— 服务端只返回被引用的列，
@@ -134,8 +134,7 @@ def _enrich_market(st):
             "float_cap_yi": round(fc / 1e8, 2) if fc else None,
             "total_cap_yi": round(tc / 1e8, 2) if tc is not None else None,
             "close_cap_day": cap_to_yuan(num("circulating_market_cap")),
-            "pe": num("pe_ratio"), "pb": num("pb_ratio"),
-            "turnover": num("turnover_rate"),
+            "price": num("price"),
         })
         final.append(x)
     for k, v in rej2.items():

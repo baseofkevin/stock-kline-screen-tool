@@ -30,12 +30,8 @@ from kline_screen.datasources import industry as industry_mod  # noqa: E402
 from kline_screen.datasources.kline import (bar_at, bar_high, bar_low,  # noqa: E402
                                             to_bar)
 from kline_screen.datasources.market import cross_sig  # noqa: E402
-from kline_screen.metrics.health import health_metrics  # noqa: E402
-from kline_screen.metrics.statements import (_order_proxy,  # noqa: E402
-                                             _stmt_annual, _stmt_latest)
 from kline_screen.metrics.turnover import (annotate_turnover,  # noqa: E402
                                            apply_turnover)
-from kline_screen.metrics.valuation import valuation_metrics  # noqa: E402
 from kline_screen.output import csv_row, turn_cell, turn_star  # noqa: E402
 from kline_screen.rules import find_start, judge  # noqa: E402
 
@@ -122,10 +118,14 @@ class ScreenHelpersTest(unittest.TestCase):
 
     def test_turn_star_buckets(self):
         self.assertEqual(p.CSV_HEADER[2:4], ["一级行业", "二级行业"])
-        self.assertEqual(p.CSV_HEADER[15], "分位星级")
-        self.assertEqual(len(p.CSV_HEADER), 20)
-        self.assertEqual(p.CSV_HEADER[16:], ["最新收盘价", "PE", "PB", "PS"])
+        self.assertEqual(p.CSV_HEADER[13], "分位星级")
+        self.assertEqual(len(p.CSV_HEADER), 15)
+        self.assertEqual(p.CSV_HEADER[14:], ["最新收盘价"])
         self.assertNotIn("订单增长", p.CSV_HEADER)
+        self.assertNotIn("经营现金流情况", p.CSV_HEADER)
+        self.assertNotIn("财务健康提示", p.CSV_HEADER)
+        for k in ("PE", "PB", "PS"):
+            self.assertNotIn(k, p.CSV_HEADER)
         self.assertFalse(any(h.startswith("DCF") for h in p.CSV_HEADER))
         self.assertEqual(turn_star(0), "***")
         self.assertEqual(turn_star(19.9), "***")
@@ -137,38 +137,12 @@ class ScreenHelpersTest(unittest.TestCase):
         self.assertEqual(turn_star(100), "")
         self.assertEqual(turn_star(None), "")
 
-    def test_order_proxy(self):
-        self.assertEqual(_order_proxy({"ContractLiability": "10", "AdvanceReceipts": "5"}), 15.0)
-        self.assertEqual(_order_proxy({"ContractLiability": "10"}), 10.0)
-        self.assertEqual(_order_proxy({"ContractLiability": 0}), 0.0)
-        self.assertIsNone(_order_proxy({}))
-
     def test_statement_date_helpers(self):
         self.assertEqual(pub_date("2026-08-15 00:00:00 +0800 CST"), "2026-08-15")
         self.assertEqual(end_date({"EndDate": "2026-06-30 00:00:00"}), "2026-06-30")
         self.assertEqual(prev_quarter("2026-03-31"), "2025-12-31")
         self.assertEqual(prev_quarter("2026-12-31"), "2026-09-30")
         self.assertIsNone(prev_quarter("2026-05-31"))
-
-    def test_stmt_latest_respects_publish_date(self):
-        rows = [
-            _report("2024-12-31", "2025-03-01", value=1),
-            _report("2025-12-31", "2026-03-01", value=2),
-            _report("2026-06-30", "2026-08-01", value=3),
-        ]
-        latest = _stmt_latest(rows, "2026-06-01")
-        self.assertEqual(latest["value"], 2)
-
-    def test_stmt_annual_filters_and_orders(self):
-        rows = [
-            _report("2024-12-31", "2025-03-01", value=1),
-            _report("2025-12-31", "2026-03-01", value=2),
-            _report("2025-06-30", "2025-08-01", value=3),
-            _report("2026-12-31", "2027-03-01", value=4),
-        ]
-        annual = _stmt_annual(rows, "2026-06-01", n=2)
-        self.assertEqual([r["value"] for r in annual], [1, 2])
-
 
 class FindStartAndJudgeTest(unittest.TestCase):
     def setUp(self):
@@ -339,80 +313,6 @@ class TurnoverTest(unittest.TestCase):
         self.assertEqual(dropped, [])
 
 
-class HealthMetricsTest(unittest.TestCase):
-    def _normal_rows(self):
-        inc = [
-            _report("2023-12-31", "2024-03-01", OperatingRevenue=100),
-            _report("2024-12-31", "2025-03-01", OperatingRevenue=110),
-            _report("2025-12-31", "2026-03-01", OperatingRevenue=121),
-        ]
-        bal = []
-        for end, pub, ar in (
-            ("2023-12-31", "2024-03-01", 20.0),
-            ("2024-12-31", "2025-03-01", 22.0),
-            ("2025-12-31", "2026-03-01", 24.2),
-        ):
-            bal.append(_report(
-                end, pub,
-                CashEquivalents=100,
-                ShortTermLoan=50,
-                TotalCurrentAssets=200,
-                Inventories=50,
-                TotalCurrentLiability=100,
-                BillAccReceivable=ar,
-            ))
-        ratio = [
-            _report("2024-12-31", "2025-03-01", NPParentCompanyOwners=10, NetOperateCashFlow=10),
-            _report("2025-12-31", "2026-03-01", NPParentCompanyOwners=10, NetOperateCashFlow=10),
-        ]
-        return inc, bal, ratio
-
-    def test_normal_metrics(self):
-        inc, bal, ratio = self._normal_rows()
-        m = health_metrics(inc, bal, ratio, "2026-06-01")
-        self.assertEqual(m["level"], "正常", m)
-        self.assertAlmostEqual(m["cash_debt"], 2.0)
-        self.assertAlmostEqual(m["quick"], 1.5)
-        self.assertTrue(m["net_bad"] is False)
-        self.assertTrue(m["ar_bad"] is False)
-
-    def test_high_risk_metrics(self):
-        inc = [
-            _report("2023-12-31", "2024-03-01", OperatingRevenue=100),
-            _report("2024-12-31", "2025-03-01", OperatingRevenue=110),
-            _report("2025-12-31", "2026-03-01", OperatingRevenue=121),
-        ]
-        bal = []
-        for end, pub, ar in (
-            ("2023-12-31", "2024-03-01", 20.0),
-            ("2024-12-31", "2025-03-01", 30.0),
-            ("2025-12-31", "2026-03-01", 45.0),
-        ):
-            bal.append(_report(
-                end, pub,
-                CashEquivalents=10,
-                ShortTermLoan=100,
-                TotalCurrentAssets=100,
-                Inventories=80,
-                TotalCurrentLiability=100,
-                BillAccReceivable=ar,
-            ))
-        ratio = [
-            _report("2024-12-31", "2025-03-01", NPParentCompanyOwners=10, NetOperateCashFlow=2),
-            _report("2025-12-31", "2026-03-01", NPParentCompanyOwners=10, NetOperateCashFlow=2),
-        ]
-        m = health_metrics(inc, bal, ratio, "2026-06-01")
-        self.assertEqual(m["level"], "高危", m)
-        self.assertGreaterEqual(m["score"], 2)
-        self.assertTrue(m["net_bad"])
-        self.assertTrue(m["ar_bad"])
-
-    def test_missing_data(self):
-        m = health_metrics([], [], [], "2026-06-01")
-        self.assertEqual(m["level"], "数据不足")
-        self.assertEqual(m["score"], 0)
-
-
 class AtomicWriteTest(unittest.TestCase):
     def test_json_atomic_write(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -431,7 +331,7 @@ class AtomicWriteTest(unittest.TestCase):
 
 class CliSmokeTest(unittest.TestCase):
     def test_scripts_show_help_without_network(self):
-        for script in (ROOT / "kline-screan.py",
+        for script in (ROOT / "kline_screen.py",
                        ROOT / "evaluation" / "download_history.py",
                        ROOT / "evaluation" / "evaluate.py"):
             with self.subTest(script=script.name):
@@ -464,48 +364,29 @@ class DownloadHistoryHelpersTest(unittest.TestCase):
             self.assertIsNone(dh.retry(lambda: None, what="test", tries=1))
 
 
-class ValuationTest(unittest.TestCase):
-    """PS 估值列：纯函数、不联网。"""
-
-    def test_ps_uses_latest_period_only(self):
-        rows = [{"EndDate": "2025-06-30", "OperatingRevenueTTM": 1e8},
-                {"EndDate": "2026-09-30", "OperatingRevenueTTM": None}]
-        d = valuation_metrics(rows, [], {"total_market_cap": 5e9})
-        self.assertIsNone(d["ps"])          # 最新期缺 TTM → 留空，不回退旧期
-
-    def test_ps_basic(self):
-        rows = [{"EndDate": "2026-09-30", "OperatingRevenueTTM": 1e9}]
-        d = valuation_metrics(rows, [], {"total_market_cap": 5e9})
-        self.assertEqual(d["ps"], 5.0)
-
-    def test_financial_ps_not_applicable(self):
-        rows = [{"EndDate": "2025-12-31", "OperatingRevenueTTM": 1e9,
-                 "EnterpriseType": "证券公司"}]
-        d = valuation_metrics(rows, [], {"total_market_cap": 5e9})
-        self.assertIsNone(d["ps"])
+class CsvRowTest(unittest.TestCase):
+    """CSV 行组装：纯函数、不联网。"""
 
     def test_csv_row(self):
         x = {"code": "sh600000", "name": "浦发银行", "d_star": "2026-11-02",
              "sw1": "银行", "sw2": "股份制银行Ⅱ",
              "age": 2, "vcross": 3.14159, "chg": 5.5, "r20": 1.2, "r60": 3.4,
-             "turn_p1": "是", "turn_gm": "毛利率 20%", "turn_p2": "无数据",
-             "turn_p3": "否", "health_text": "正常：四项未触发",
-             "turn20": 1.5, "turn20_rank": 12.3,
-             "price": 7.491, "pe": -25.06, "pb": 2.65, "ps": 4.3}
+             "turn_p1": "是", "turn_gm": "毛利率 20%",
+             "turn20": 1.5, "turn20_rank": 12.3, "price": 7.491}
         row = csv_row(x)
         self.assertEqual(len(row), len(p.CSV_HEADER))
-        self.assertEqual(len(row), 20)
+        self.assertEqual(len(row), 15)
         self.assertEqual(row[2:4], ["银行", "股份制银行Ⅱ"])
         self.assertEqual(row[6], 3.14)
         self.assertEqual(row[10], "是：毛利率 20%")
-        self.assertEqual(row[11], "否")
-        self.assertEqual(row[16:], [7.49, -25.06, 2.65, 4.3])
-        # 缺字段时不能崩：行业列记「未分类」，估值列留空
+        self.assertEqual(row[13], "***")
+        self.assertEqual(row[14], 7.49)
+        # 缺字段时不能崩：行业列记「未分类」，收盘价留空
         bare = dict(x)
-        for k in ("price", "pe", "pb", "ps", "sw1", "sw2"):
+        for k in ("price", "sw1", "sw2"):
             bare.pop(k)
         self.assertEqual(csv_row(bare)[2:4], ["未分类", "未分类"])
-        self.assertEqual(csv_row(bare)[16:], ["", "", "", ""])
+        self.assertEqual(csv_row(bare)[14], "")
 
 
 class IndustryMapTest(unittest.TestCase):

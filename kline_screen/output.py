@@ -2,11 +2,7 @@
 import os
 
 from .common.values import r2
-from .params import (C2_TOL, C3_RATIO, HEALTH_ANNUAL_YEARS,
-                     HEALTH_AR_GAP_WARN, HEALTH_CASH_DEBT_DANGER,
-                     HEALTH_CASH_DEBT_WARN, HEALTH_OCF_NP_WARN,
-                     HEALTH_QUICK_WARN, TURN_CL_REV_MIN, TURN_CL_YOY_MIN,
-                     TURN_GM_REQUIRE_YOY, TURN_OCF_NP_MIN)
+from .params import C2_TOL, C3_RATIO, TURN_GM_REQUIRE_YOY
 from .rules import REJ_STAGE
 
 
@@ -38,19 +34,16 @@ def turn_cell(label, desc):
 
 
 def csv_row(x):
-    """一只入选股的 CSV 行，顺序与 CSV_HEADER 严格对应（20 列）。"""
+    """一只入选股的 CSV 行，顺序与 CSV_HEADER 严格对应（15 列）。"""
     return [
         x["code"], x.get("name") or "",
         x.get("sw1") or "未分类", x.get("sw2") or "未分类",
         x["d_star"], x["age"], round(x["vcross"], 2), x.get("chg"),
         x["r20"], x["r60"],
         turn_cell(x.get("turn_p1", ""), x.get("turn_gm", "")),
-        turn_cell(x.get("turn_p3", ""), x.get("turn_ocf", "")),
-        x.get("health_text", ""),
         x.get("turn20"), x.get("turn20_rank"),
         turn_star(x.get("turn20_rank")),
-        r2(x.get("price")), r2(x.get("pe")), r2(x.get("pb")),
-        r2(x.get("ps")),
+        r2(x.get("price")),
     ]
 
 
@@ -61,7 +54,7 @@ def build_result(st):
     csv_path, res_path = st["csv_path"], st["res_path"]
     stats = dict(sorted(st["rej"].items(), key=lambda kv: -kv[1]))
     return {
-        "版本": "v1.8",
+        "版本": "v1.9",
         "基准日": st["S"], "扫描周期K": a.n + 1, "新鲜度窗口N": a.n,
         "覆盖区间": st["need"],
         "参数": {"K_VOL": a.k_vol, "涨幅区间": [a.chg_lo, a.chg_hi],
@@ -75,30 +68,12 @@ def build_result(st):
                  "市值比分母来源": "mv_<d*>.json（screen condition NegotiableMV）",
                  "行业归属": "申万一级/二级，来源 westock data_sector；"
                              "只展示，不参与裁决（v1.7 起）"},
-        "业绩转变参数": {"判定方式": "三项独立判断，不合计总分",
+        "业绩转变参数": {"判定方式": "①毛利率环比改善单项，不合成总分",
                          "①毛利率环比季数": 2,
                          "①营收环比不为负": True,
                          "①最新单季毛利率高于上年同季": TURN_GM_REQUIRE_YOY,
-                         "②合同负债+预收同比下限%": TURN_CL_YOY_MIN,
-                         "②订单代理字段": "ContractLiability+AdvanceReceipts",
-                         "②订单/营收TTM下限%": TURN_CL_REV_MIN,
-                         "③经营现金流TTM下限": 0,
-                         "③现金流/净利润下限": TURN_OCF_NP_MIN,
-                         "③OCF由负转正算通过": True,
-                         "③亏损但OCF为正算通过": True,
                          "数据是否可用": turn is not None,
                          "缺失代码": st["turn_failed"]},
-        "财务健康参数": {
-            "现金短债比紧张阈值": HEALTH_CASH_DEBT_WARN,
-            "现金短债比高危阈值": HEALTH_CASH_DEBT_DANGER,
-            "净现比下限": HEALTH_OCF_NP_WARN,
-            "净现比连续年数": HEALTH_ANNUAL_YEARS,
-            "应收增速差上限pct": HEALTH_AR_GAP_WARN,
-            "应收增速差连续年数": HEALTH_ANNUAL_YEARS,
-            "速动比率下限": HEALTH_QUICK_WARN,
-            "货币资金口径": "CashEquivalents（接口无受限资金字段，未剔受限）",
-            "应收口径": "BillAccReceivable",
-            "短期有息负债口径": "ShortTermLoan + NonCurrentLiabilityIn1Year"},
         "粗筛池": st["pool_n"], "入选数": len(st["final"]),
         # 剔除非（兼容旧字段）/ 剔除统计 为同一份归一化聚合
         "剔除非": stats,
@@ -137,8 +112,7 @@ def print_summary(st):
         print(f"\n{'代码':10s}{'名称':9s}{'启动日':12s}{'距启动':>6s}"
               f"{'量能':>7s}{'换手%':>7s}{'池内分位':>7s}"
               f"{'距MA20':>8s}{'距MA60':>8s}{'市值比':>8s}"
-              f"{'流通市值亿':>11s}{'PE':>10s}"
-              f"{'①':>3s}{'②':>3s}{'③':>3s}")
+              f"{'流通市值亿':>11s}{'①':>3s}")
         for x in final:
             t20 = f"{x['turn20']:7.2f}" if x.get("turn20") is not None else "      -"
             tr = (f"{x['turn20_rank']:7.1f}"
@@ -149,10 +123,7 @@ def print_summary(st):
                   f"{x['r20']:8.2f}{x['r60']:8.2f}"
                   f"{(x.get('flow_ratio') or 0):7.2f}%"
                   f"{str(x.get('float_cap_yi') or '-'):>11s}"
-                  f"{str(x.get('pe') or '-'):>10s}"
-                  f"{_mark(x.get('turn_p1')):>3s}"
-                  f"{_mark(x.get('turn_p2')):>3s}"
-                  f"{_mark(x.get('turn_p3')):>3s}")
+                  f"{_mark(x.get('turn_p1')):>3s}")
     print(f"\nCSV    : {st['csv_path']}")
     print(f"明细   : {st['res_path']}")
     print(f"原始数据: {st['DB']}/")

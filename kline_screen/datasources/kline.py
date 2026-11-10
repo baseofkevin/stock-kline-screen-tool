@@ -6,12 +6,15 @@ import sys
 import time
 
 from ..config import DB, W
+from ..common.session import MARKET_CLOSE, cache_final, session_final
 from ..common.storage import jdump, jload
 from ..common.values import fnum
 from ..common.westock import md, retry, run
-from ..params import (KLINE_BAD_LIMIT, KLINE_BATCH, KLINE_DELTA_BATCH,
-                      KLINE_FLUSH_EVERY, KLINE_MAX_BARS, KLINE_PACE_MAX,
-                      KLINE_PACE_MIN, KLINE_RETRY_BATCH, MIN_HISTORY)
+from ..params import (KLINE_BACKOFF_BASE, KLINE_BACKOFF_MAX, KLINE_BAD_LIMIT,
+                      KLINE_BATCH, KLINE_DELTA_BATCH, KLINE_FLUSH_EVERY,
+                      KLINE_MAX_BARS, KLINE_PACE_MAX, KLINE_PACE_MIN,
+                      KLINE_RETRY_BATCH, KLINE_SPLIT_DEPTH, KLINE_SPLIT_MIN,
+                      KLINE_STALE_ROUNDS, MIN_HISTORY)
 
 
 BAR_ORDER = "date,close,volume,open,high,low,amount"
@@ -80,8 +83,63 @@ def _kline_batch(ch, beg, end, tries=3, allow_empty=False):
                  what=f"日K线（{len(ch)} 只，{ch[0]} 起）")
 
 
+def _kline_fetch(ch, beg, end, tries=3, allow_empty=False, depth=0):
+    """取一批日 K，**丢码时当场把缺失的拆半再取**，最多拆 KLINE_SPLIT_DEPTH 层。
+
+    为什么不等：服务端限频的表现不是「整批失败」，而是「60 只只回 10 只」——
+    单次返回条数被压掉一个数量级。此时等几十秒再发同样的 60 只请求，往往还是回
+    10 只（2026-11-10 实测连续 6 批都是 10/60）；而拆成 10 只一批，一次就全回。
+    所以这里不靠等待，靠**减小单次请求的规模**把数据拿全。
+
+    返回 {code: bars}；整批彻底失败返回 None（调用方按接口故障处理）。
+    """
+    rows = _kline_batch(ch, beg, end, tries=tries, allow_empty=allow_empty)
+    if rows is None:
+        return None
+    got = _kline_bars(rows, ch)
+    missing = [c for c in ch if c not in got]
+    if not missing or depth >= KLINE_SPLIT_DEPTH or len(ch) <= KLINE_SPLIT_MIN:
+        return got
+    half = max(KLINE_SPLIT_MIN, len(missing) // 2)
+    for i in range(0, len(missing), half):
+        sub = missing[i:i + half]
+        sub_got = _kline_fetch(sub, beg, end, tries=tries,
+                               allow_empty=allow_empty, depth=depth + 1)
+        if sub_got:
+            got.update(sub_got)
+    return got
+
+
+def _traded_on(codes, day):
+    """这些票在 day 到底有没有成交 —— 用来区分「限频漏取」和「真停牌」。
+
+    只问行情快照（每批 20 只、带 --date），不回 K 线：停牌股快照里 volume=0。
+    返回 {code: 是否成交}，**只包含真正核对到的票**；核对不到的码不出现在结果里，
+    调用方据此判断结论是否完整（不能把「没拿到快照」当成「没成交」）。
+    """
+    from .market import get_quotes        # 延迟导入，避免 datasources 包内循环
+    out = {}
+    try:
+        snap = get_quotes(list(codes), day, False) or {}
+    except Exception:                     # 行情接口抖动不应把整次运行拖死
+        return out
+    for c in codes:
+        row = snap.get(c)
+        if row is None:
+            continue
+        try:
+            out[c] = float(row.get("volume") or 0) > 0
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _kline_files():
-    """database/ 下所有 kline_<起>_<止>.json，按截止日新→旧。"""
+    """database/ 下所有 kline_<起>_<止>.json，按截止日新→旧。
+
+    注意正则锚定在第二个日期后紧跟 `.json`，因此 kline_<起>_<止>.meta.json
+    不会被误当成底稿。
+    """
     out = []
     if not os.path.isdir(DB):
         return out
@@ -93,7 +151,48 @@ def _kline_files():
     return out
 
 
-def _load_kline_base(path, refresh):
+def _kline_meta(path):
+    """kline_<起>_<止>.json → kline_<起>_<止>.meta.json（同目录旁挂）。"""
+    return path[:-5] + ".meta.json" if path.endswith(".json") else path + ".meta.json"
+
+
+def _flush(path, km, end):
+    """落盘 K 线，并记下这份底稿是「哪一天收盘定稿」写出来的。
+
+    meta 里的 final 是防「盘中半成品 bar 被永久留下」的：增量逻辑只要
+    「最后一根日期 == end」就认为这只已更新，不会再取；若不记录定稿状态，
+    盘中抓的那根（收盘价/成交量都是半成品）会一直留在库里，之后所有重跑
+    都拿它当终值，且没有任何提示。
+    """
+    jdump(path, km)
+    jdump(_kline_meta(path),
+          {"end": end, "final": session_final(end),
+           "saved_at": dt.datetime.now().isoformat(timespec="seconds")})
+
+
+def _drop_unfinal_tail(km, path, end):
+    """底稿写于 end 的收盘前 → 丢掉 end 那根 bar，让它被重新补取。
+
+    只动「最后一根正好是 end」的票；历史日（end 早于写入日）不受影响。
+    """
+    if not km or not end:
+        return km
+    meta = jload(_kline_meta(path), {})
+    if cache_final(path, end, meta):
+        return km
+    n = 0
+    for bars in km.values():
+        if bars and bars[-1][0] == end:
+            bars.pop()
+            n += 1
+    if n:
+        sys.stderr.write(
+            f"  [警告] 底稿 {os.path.basename(path)} 写于 {end} 收盘前，"
+            f"已丢弃 {n} 只当日的半成品 K 线，将重新补取\n")
+    return km
+
+
+def _load_kline_base(path, refresh, end):
     """K 线底稿 {code: bars}。refresh 时为空（=全量重下）。
 
     优先用同名缓存（说明这段区间已拉全），否则借用最新一份 kline_*.json 当底：
@@ -103,14 +202,14 @@ def _load_kline_base(path, refresh):
     if refresh:
         return {}
     if os.path.exists(path):
-        return jload(path, {})
-    for _end, name, p in _kline_files():
+        return _drop_unfinal_tail(jload(path, {}), path, end)
+    for f_end, name, p in _kline_files():
         if os.path.abspath(p) == os.path.abspath(path):
             continue
         km = jload(p, {})
         if km:
             sys.stderr.write(f"  复用历史底稿 {name}（只补新增交易日）\n")
-            return km
+            return _drop_unfinal_tail(km, p, f_end)
     return {}
 
 
@@ -153,7 +252,7 @@ def get_kline(codes, beg, end, refresh, require_codes=None):
     """
     require_codes = set(require_codes or ())
     path = os.path.join(DB, f"kline_{beg}_{end}.json")
-    base = _load_kline_base(path, refresh)
+    base = _load_kline_base(path, refresh, end)
     pool = set(codes)
     # 只保留本次候选；统一成升序；并**截掉晚于 end 的 K 线**。
     # 截断这一步是必须的：回看旧日期（--date 早于底稿的截止日）时，底稿里的"未来"
@@ -194,8 +293,8 @@ def get_kline(codes, beg, end, refresh, require_codes=None):
         sys.stderr.write(f"  [{wi}/{len(work)}] {label}：{len(group)} 只"
                          f"（{len(chunks)} 批 × ≤{bsz} 只，{start} ~ {end}）\n")
         for n, ch in enumerate(chunks, 1):
-            rows = _kline_batch(ch, start, end, allow_empty=may_empty)
-            if rows is None:
+            got = _kline_fetch(ch, start, end, allow_empty=may_empty)
+            if got is None:
                 bad += 1
                 sys.stderr.write(f"\n  第 {label} {n}/{len(chunks)} 批整体失败"
                                  f"（{len(ch)} 只），留给补取\n")
@@ -205,24 +304,24 @@ def get_kline(codes, beg, end, refresh, require_codes=None):
                         f"终止以免产出不可信名单")
             else:
                 bad = 0
-                got = _kline_bars(rows, ch)
                 _merge_bars(km, got)
                 if not got and may_empty:
                     pass                                        # 整批停牌，正常
                 elif len(got) >= len(ch):
                     pace = max(KLINE_PACE_MIN, pace * 0.7)      # 完整 → 慢慢提速
                 else:
-                    pace = min(KLINE_PACE_MAX, pace * 2 + 0.2)  # 丢码 → 减速
-                    sys.stderr.write(f"\n  {label} 第 {n} 批只回 {len(got)}/{len(ch)} 只"
+                    pace = min(KLINE_PACE_MAX, pace * 2 + 0.2)  # 仍缺 → 减速
+                    sys.stderr.write(f"\n  {label} 第 {n} 批仍缺 "
+                                     f"{len(ch) - len(got)}/{len(ch)} 只"
                                      f"（服务端限频），节流到 {pace:.1f}s\n")
             sys.stderr.write(f"\r  {label} {n}/{len(chunks)} 批  库内 {len(km)} 只")
             sys.stderr.flush()
             if KLINE_FLUSH_EVERY and n % KLINE_FLUSH_EVERY == 0:
-                jdump(path, km)
+                _flush(path, km, end)
             time.sleep(pace)
         sys.stderr.write("\n")
         if wi < len(work):      # 最后一批不做中途落盘，收尾还会写一次
-            jdump(path, km)
+            _flush(path, km, end)
 
     # 批量拉取时单只失败会静默跳过（限频、接口部分失败），因此按小批补取；
     # 小批还不行就退到逐只。
@@ -237,13 +336,13 @@ def get_kline(codes, beg, end, refresh, require_codes=None):
                          f"{len(groups)} 批 × {bs} 只）...\n")
         before = set(km)
         for gi, grp in enumerate(groups, 1):
-            rows = _kline_batch(grp, beg, end, tries=2)
-            _merge_bars(km, _kline_bars(rows or [], grp))
+            got = _kline_fetch(grp, beg, end, tries=2)
+            _merge_bars(km, got or {})
             left = sum(1 for c in codes if not km.get(c))
             sys.stderr.write(f"\r    补取 {gi}/{len(groups)} 批，仍缺 {left} 只")
             sys.stderr.flush()
             time.sleep(0.3)
-        jdump(path, km)
+        _flush(path, km, end)
         sys.stderr.write("\n")
         for c in sorted(set(km) - before):
             if len(km[c]) < MIN_HISTORY:
@@ -264,40 +363,84 @@ def get_kline(codes, beg, end, refresh, require_codes=None):
                 if bars[-1][0] == end and len(bars) >= len(km.get(c, [])):
                     km[c] = bars
             time.sleep(0.3)
-        jdump(path, km)
+        _flush(path, km, end)
 
-    # ② 基准日有成交（require_codes）却仍没有 end 日 K：必须重取整段，仍缺就报错，
-    #    不能把它当成停牌、用「K线无 S 数据」静默剔除。
-    stale_req = sorted(c for c in codes
-                       if c in require_codes and km.get(c) and km[c][-1][0] != end)
-    if stale_req:
-        sys.stderr.write(f"\n  校验：{len(stale_req)} 只在 {end} 有成交但 K 线未到"
-                         f"{end}，重取整段 ...\n")
-        for i in range(0, len(stale_req), KLINE_RETRY_BATCH):
-            grp = stale_req[i:i + KLINE_RETRY_BATCH]
-            rows = _kline_batch(grp, beg, end, tries=2)
-            for c, bars in _kline_bars(rows or [], grp).items():
-                if bars[-1][0] == end and len(bars) >= len(km.get(c, [])):
-                    km[c] = bars
-            time.sleep(0.3)
-        jdump(path, km)
-        left = [c for c in stale_req if km.get(c) and km[c][-1][0] != end]
-        if left:
-            raise RuntimeError(
-                f"K线未更新且重取失败：{left[:8]}"
-                f"{'…' if len(left) > 8 else ''} 在 {end} 有成交，"
-                f"不能按停牌处理。请加 --refresh 或检查接口。")
+    # ② 「末日≠end」的票逐轮补取。**必须重试全部 stale，不能只重试 require_codes**：
+    #    服务端限频时一批只回几只，非「当日在粗筛池」的票没有第二次机会，会被 ③
+    #    当成停牌静默剔除 —— 等于悄悄漏股。2026-11-10 实测：4972 只里有 210 只明明
+    #    在 11-09 有 K 线（逐只问过服务端，无一停牌），却因限频一直停在 11-06，
+    #    导致当日名单少 2 只。
+    #    补取按「最后一根 + 1 天」分组：每批只回 1~3 行，比整段 300 根便宜一个量级；
+    #    用 _merge_bars 按日期合并（不整段替换），因此不存在「响应被截断而覆盖历史」的风险。
+    #    硬性门禁仍然只有 require_codes：它们缺 end 日 K 一律报错。
+    must = [c for c in codes if c in require_codes]
+    for rnd in range(KLINE_STALE_ROUNDS):
+        todo = [c for c in codes if km.get(c) and km[c][-1][0] != end]
+        if not todo:
+            break
+        groups = {}
+        for c in todo:
+            nxt = (dt.date.fromisoformat(km[c][-1][0])
+                   + dt.timedelta(days=1)).isoformat()
+            groups.setdefault(nxt, []).append(c)
+        sys.stderr.write(f"\n  校验：{len(todo)} 只 K 线未到 {end}，"
+                         f"第 {rnd + 1} 轮补取 ...\n")
+        for start, grp in sorted(groups.items()):
+            for i in range(0, len(grp), KLINE_DELTA_BATCH):
+                ch = grp[i:i + KLINE_DELTA_BATCH]
+                _merge_bars(km, _kline_fetch(ch, start, end, tries=2,
+                                             allow_empty=True) or {})
+                time.sleep(0.3)
+        _flush(path, km, end)
+        still = sum(1 for c in todo if km.get(c) and km[c][-1][0] != end)
+        sys.stderr.write(f"    本轮补上 {len(todo) - still} 只，仍缺 {still} 只\n")
+        if still == len(todo):      # 毫无进展：再等也是一样，交给下面的判定
+            break
+        if rnd < KLINE_STALE_ROUNDS - 1:
+            wait = min(KLINE_BACKOFF_MAX, KLINE_BACKOFF_BASE * (2 ** rnd))
+            sys.stderr.write(f"    退避 {wait:.0f}s 后继续（限频窗口通常几十秒）\n")
+            time.sleep(wait)
+    left = [c for c in must if km.get(c) and km[c][-1][0] != end]
+    if left:
+        raise RuntimeError(
+            f"K线未更新且重取失败：{left[:8]}"
+            f"{'…' if len(left) > 8 else ''} 在 {end} 有成交，不能按停牌处理。"
+            + (f"\n  当前 {dt.datetime.now():%Y-%m-%d %H:%M}，若 {end} 就是今天，"
+               f"说明当日日线尚未收盘定稿，请 {MARKET_CLOSE:%H:%M} 之后重跑。"
+               if not session_final(end) else "")
+            + f"\n  已在 {KLINE_STALE_ROUNDS} 轮内补取（含逐批二分）仍不齐，"
+              f"请隔几分钟重跑（已抓到的会增量复用）；否则加 --refresh 重下整段。")
 
-    # ③ 其余末日≠end 的（多为停牌）如实提示，按「无 end 数据」剔除
+    # ③ 收尾兜底：仍然末日≠end 的票，**用当日行情判定它到底有没有交易**。
+    #    有成交 = 限频漏取，报错绝不产出可能漏股的名单；
+    #    无成交 = 真停牌，如实按「无 end 数据」剔除。
+    #    这一步是「宁可失败也不静默漏股」的最后一道门 —— 少了它，限频就会被
+    #    伪装成停牌，名单少几只且毫无提示（2026-11-10 真实发生过）。
     stale = [c for c in codes if km.get(c) and km[c][-1][0] != end]
     if stale:
+        verdict = _traded_on(stale, end)
+        miss = [c for c in stale if verdict.get(c)]
+        if miss:
+            last = {c: km[c][-1][0] for c in miss}
+            raise RuntimeError(
+                f"K线漏取（非停牌）：{miss[:8]}{'…' if len(miss) > 8 else ''} "
+                f"共 {len(miss)} 只在 {end} 有成交，但 K 线只到 "
+                f"{sorted(set(last.values()))[-1]}。\n"
+                f"  这些票若被当成停牌剔除，名单就会缺股，因此终止。"
+                f"请隔几分钟重跑（已抓到的会增量复用），或加 --refresh。")
+        unknown = [c for c in stale if c not in verdict]
         sys.stderr.write(
-            f"  [警告] {len(stale)} 只 K 线末日≠{end}（多为停牌），"
-            f"将按「无 {end} 数据」剔除\n")
+            f"  [警告] {len(stale)} 只 K 线末日≠{end}，经行情核对当日无成交"
+            f"（停牌），按「无 {end} 数据」剔除\n")
+        if unknown:
+            sys.stderr.write(
+                f"  [警告] 其中 {len(unknown)} 只没能从行情接口核对"
+                f"（{unknown[:6]}{'…' if len(unknown) > 6 else ''}），"
+                f"结论不完整；若名单看起来偏少，请隔几分钟重跑\n")
 
     for k in km:            # 兜底：保证全库升序（0.1 秒，换一次不变式检查）
         km[k].sort(key=lambda b: b[0])
-    jdump(path, km)
+    _flush(path, km, end)
 
     missing = [c for c in codes if not km.get(c)]
     critical_missing = sorted(set(missing) & require_codes)
@@ -305,5 +448,9 @@ def get_kline(codes, beg, end, refresh, require_codes=None):
         raise RuntimeError(
             f"K线完全缺失：{critical_missing[:8]}"
             f"{'…' if len(critical_missing) > 8 else ''} 在 {end} 有成交，"
-            f"不能按停牌处理。请加 --refresh 或检查接口。")
+            f"不能按停牌处理。"
+            + (f"\n  当前 {dt.datetime.now():%Y-%m-%d %H:%M}，若 {end} 就是今天，"
+               f"说明当日日线尚未收盘定稿，请 {MARKET_CLOSE:%H:%M} 之后重跑。"
+               if not session_final(end) else "")
+            + "\n  否则请检查接口，或加 --refresh 重下整段。")
     return km, missing

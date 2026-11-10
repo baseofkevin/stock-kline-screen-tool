@@ -48,6 +48,7 @@ W = os.path.expanduser("~/.local/bin/westock")
 # ---- 规则常量直接从 kline_screen.params 取，保证下载口径与选股规则一致 ----
 sys.path.insert(0, ROOT)
 from kline_screen import params as RULE  # noqa: E402
+from kline_screen.common.session import cache_final, session_final  # noqa: E402
 
 CROSS_TPL = RULE.CROSS_TPL            # 横截面粗筛表达式（6 个条件，短表达式，历史日期可用）
 NEW_LABELS = RULE.NEW_LABELS          # 4 个次新分桶
@@ -156,7 +157,8 @@ def download_cross(days, refresh):
         sig = RULE.cross_sig(lo, hi)
         meta = jload(meta_path, {})
         if (os.path.exists(path) and not refresh
-                and meta.get("sig") == sig):
+                and meta.get("sig") == sig
+                and cache_final(path, d, meta)):
             tick(f"粗筛 {d} (已有)")
             continue
         rows = retry(lambda: md(run([W, "screen", "condition", "--expression", expr,
@@ -169,7 +171,10 @@ def download_cross(days, refresh):
         # 选股脚本却因 meta 缺失/过期而重拉。
         jdump(meta_path, {"sig": sig,
                           "version": RULE.CROSS_CACHE_VERSION,
-                          "expression": expr})
+                          "expression": expr,
+                          # 与选股主流程一致：记下这份粗筛是不是收盘后才抓的。
+                          # 回补历史日期时恒为 True；只有「当天且未收盘」才是 False。
+                          "final": session_final(d)})
         tick(f"粗筛 {d} ({len(rows)}只)")
         time.sleep(SLEEP)
 

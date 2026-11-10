@@ -5,6 +5,7 @@ import os
 import time
 
 from ..config import DB, W
+from ..common.session import cache_final, session_final
 from ..common.storage import jdump, jload
 from ..common.westock import md, retry, run
 from ..params import (CROSS_CACHE_VERSION, CROSS_TPL, LABEL_PAGE, NEW_LABELS)
@@ -56,6 +57,11 @@ def get_cross(day, lo, hi, refresh):
     缓存带签名（表达式 + lo/hi + 版本）。改 --chg-lo/--chg-hi 或 CROSS_TPL 后不会
     复用旧结果；无 meta 的旧缓存一律按新签名重拉。
     空结果仍视为失败：历史日期接口会静默返空，不能把失败当成「当天 0 只」。
+
+    另加一道**定稿校验**（2026-11-10）：收盘前抓到的「当天」粗筛实际是盘中
+    快照（服务端照样返回名单，只是涨幅/价格都没定），一旦缓存下来，收盘后
+    重跑会直接复用，静默产出按错误涨幅筛出来的池子。所以 meta 里记 final，
+    读到非定稿的缓存就重拉。
     """
     path = os.path.join(DB, f"cross_{day}.json")
     meta_path = os.path.join(DB, f"cross_{day}.meta.json")
@@ -63,10 +69,14 @@ def get_cross(day, lo, hi, refresh):
     expr = CROSS_TPL.format(lo=lo, hi=hi)
     if os.path.exists(path) and not refresh:
         meta = jload(meta_path, {})
-        if meta.get("sig") == sig:
+        if meta.get("sig") != sig:
+            # 参数或表达式变化后旧缓存不能复用，避免把旧区间的池子当成新池。
+            print(f"      [缓存失效] {day}：参数/表达式已变，重新拉取", flush=True)
+        elif not cache_final(path, day, meta):
+            print(f"      [缓存失效] {day}：缓存在收盘前抓取（盘中快照），"
+                  f"重新拉取", flush=True)
+        else:
             return jload(path, [])
-        # 参数或表达式变化后旧缓存不能复用，避免把旧区间的池子当成新池。
-        print(f"      [缓存失效] {day}：参数/表达式已变，重新拉取", flush=True)
     rows = retry(lambda: md(run([W, "screen", "condition", "--expression",
                                  expr, "--date", day, "--limit", "6000"])),
                  what=f"横截面粗筛 {day}")
@@ -74,12 +84,17 @@ def get_cross(day, lo, hi, refresh):
         raise RuntimeError(f"横截面粗筛失败：{day}（不得据此产出名单）")
     jdump(path, rows)
     jdump(meta_path, {"sig": sig, "version": CROSS_CACHE_VERSION,
-                      "expression": expr})
+                      "expression": expr, "final": session_final(day)})
     time.sleep(0.8)
     return rows
 
 
 def get_labels(day, refresh):
+    """某交易日的排除集（ST / 次新股）。
+
+    这里**不做**定稿校验：ST 与上市日期都是「日级」属性，盘中和盘后一致，
+    不像收盘价/成交量那样盘中会变。少一次重拉也少一分被限频的风险。
+    """
     path = os.path.join(DB, f"labels_{day}.json")
     if os.path.exists(path) and not refresh:
         return jload(path, {"st": [], "new": []})
@@ -109,9 +124,18 @@ def get_labels(day, refresh):
 
 
 def get_quotes(codes, day, refresh):
+    """某交易日的行情快照（收盘价等展示列）。
+
+    收盘前抓到的快照价格等于盘中价，与「基准日收盘」口径不符，因此同样做
+    定稿校验：缓存非定稿就整份丢弃、重拉本次需要的代码。
+    """
     path = os.path.join(DB, f"quote_{day}.json")
     if os.path.exists(path) and not refresh:
         cached = jload(path, {})
+        if cached and not cache_final(path, day):
+            print(f"      [缓存失效] {day}：行情缓存在收盘前抓取，重新拉取",
+                  flush=True)
+            cached = {}
         if all(c in cached for c in codes):
             return cached
         out = dict(cached)
@@ -139,11 +163,16 @@ def get_mv(day, refresh):
     市值比的分母必须与分子（d* 日 MainNetFlow）同一天，避免 age=4 时分母
     滞后 4 个交易日，让展示的市值比被一周市值波动明显改变。
     与 download_history.download_mv() 使用同一文件名与同一格式，两个程序共用缓存。
+
+    分母是换手%的归一化基准，收盘前抓的市值与收盘市值不同，因此同样做定稿校验。
     """
     path = os.path.join(DB, f"mv_{day}.json")
     if os.path.exists(path) and not refresh:
         cached = jload(path, {})
-        if cached:
+        if cached and not cache_final(path, day):
+            print(f"      [缓存失效] {day}：市值缓存在收盘前抓取，重新拉取",
+                  flush=True)
+        elif cached:
             return cached
     rows = retry(lambda: md(run([W, "screen", "condition", "--expression",
                                  "intersect([NegotiableMV > 0, TotalMV > 0])",
