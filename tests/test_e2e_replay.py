@@ -9,7 +9,7 @@
   · 每个用例结束恢复被替换的模块属性，不污染其他测试。
 
 覆盖：
-  1. 正常流程（CSV 15 列、result JSON 字段、BOM/CRLF、计数自洽）；
+  1. 正常流程（CSV 16 列、result JSON 字段、BOM/CRLF、计数自洽、总市值对账）；
   2. 换手硬过滤（--turn-pct 0.4）；
   3. 财务取数整体失败时的降级；
   4. 粗筛池为空时只写表头；
@@ -199,10 +199,11 @@ class ReplayPipelineTest(unittest.TestCase):
 
     HEADER = ["代码", "名称", "一级行业", "二级行业", "启动日", "距启动交易日",
               "启动日量能倍数", "启动日涨幅%", "距MA20%", "距MA60%",
-              "毛利率改善", "20日换手%", "池内换手分位", "分位星级", "最新收盘价"]
+              "毛利率改善", "20日换手%", "池内换手分位", "分位星级", "最新收盘价",
+              "总市值（亿）"]
 
     def test_normal_flow(self):
-        """完整流程：15 列 CSV、result v1.9、字段已清理、计数自洽。"""
+        """完整流程：16 列 CSV、result v1.10、字段已清理、计数自洽。"""
         code, csv_path, res_path = self._run()
         self.assertEqual(code, 0)
         rows = self._read_csv(csv_path)
@@ -213,22 +214,36 @@ class ReplayPipelineTest(unittest.TestCase):
 
         for r in body:
             with self.subTest(code=r[0]):
-                self.assertEqual(len(r), 15)
+                self.assertEqual(len(r), 16)
                 self.assertTrue(r[0].startswith(("sh", "sz", "bj")))
                 self.assertEqual(len(r[4]), 10)          # 启动日 YYYY-MM-DD
                 self.assertLessEqual(int(r[5]), 4)       # 新鲜度
                 self.assertNotEqual(r[10], "")           # 毛利率列非空
                 float(r[14])                             # 收盘价可转数字
+                self.assertNotEqual(r[15], "")           # 总市值非空
+                self.assertGreater(float(r[15]), 0)      # 且为正数
 
         res = self._result(res_path)
-        self.assertEqual(res["版本"], "v1.9")
+        self.assertEqual(res["版本"], "v1.10")
         self.assertNotIn("财务健康参数", res)
+        self.assertIn("总市值列", res["参数"])   # 口径说明须可追溯
         self.assertFalse(any(k.startswith(("②", "③"))
                              for k in res["业绩转变参数"]))
         self.assertIn("①最新单季毛利率高于上年同季", res["业绩转变参数"])
         self.assertEqual(res["粗筛池"],
                          res["入选数"] + sum(res["剔除统计"].values()))
         self.assertEqual(len(body), res["入选数"])
+
+        # 总市值对账：CSV 第 16 列 = mv 缓存的总市值(元)/1e8（回放里 get_mv
+        # 对所有 d* 都返回同一份 MV 快照，因此可直接按代码对账）
+        by_code = {r[0]: r for r in body}
+        for x in res["名单"]:
+            with self.subTest(mv=x["code"]):
+                pair = self.MV.get(x["code"])
+                self.assertIsNotNone(pair, f"mv 缓存缺 {x['code']}")
+                expected = round(float(pair[1]) / 1e8, 2)
+                self.assertAlmostEqual(float(by_code[x["code"]][15]),
+                                       expected, places=6)
 
         for x in res["名单"]:
             with self.subTest(code=x["code"]):

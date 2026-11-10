@@ -119,8 +119,8 @@ class ScreenHelpersTest(unittest.TestCase):
     def test_turn_star_buckets(self):
         self.assertEqual(p.CSV_HEADER[2:4], ["一级行业", "二级行业"])
         self.assertEqual(p.CSV_HEADER[13], "分位星级")
-        self.assertEqual(len(p.CSV_HEADER), 15)
-        self.assertEqual(p.CSV_HEADER[14:], ["最新收盘价"])
+        self.assertEqual(len(p.CSV_HEADER), 16)
+        self.assertEqual(p.CSV_HEADER[14:], ["最新收盘价", "总市值（亿）"])
         self.assertNotIn("订单增长", p.CSV_HEADER)
         self.assertNotIn("经营现金流情况", p.CSV_HEADER)
         self.assertNotIn("财务健康提示", p.CSV_HEADER)
@@ -372,21 +372,24 @@ class CsvRowTest(unittest.TestCase):
              "sw1": "银行", "sw2": "股份制银行Ⅱ",
              "age": 2, "vcross": 3.14159, "chg": 5.5, "r20": 1.2, "r60": 3.4,
              "turn_p1": "是", "turn_gm": "毛利率 20%",
-             "turn20": 1.5, "turn20_rank": 12.3, "price": 7.491}
+             "turn20": 1.5, "turn20_rank": 12.3, "price": 7.491,
+             "total_cap_yi": 123.456}
         row = csv_row(x)
         self.assertEqual(len(row), len(p.CSV_HEADER))
-        self.assertEqual(len(row), 15)
+        self.assertEqual(len(row), 16)
         self.assertEqual(row[2:4], ["银行", "股份制银行Ⅱ"])
         self.assertEqual(row[6], 3.14)
         self.assertEqual(row[10], "是：毛利率 20%")
         self.assertEqual(row[13], "***")
         self.assertEqual(row[14], 7.49)
-        # 缺字段时不能崩：行业列记「未分类」，收盘价留空
+        self.assertEqual(row[15], 123.46)   # 总市值（亿），2 位小数
+        # 缺字段时不能崩：行业列记「未分类」，收盘价/总市值留空
         bare = dict(x)
-        for k in ("price", "sw1", "sw2"):
+        for k in ("price", "sw1", "sw2", "total_cap_yi"):
             bare.pop(k)
         self.assertEqual(csv_row(bare)[2:4], ["未分类", "未分类"])
         self.assertEqual(csv_row(bare)[14], "")
+        self.assertEqual(csv_row(bare)[15], "")
 
 
 class IndustryMapTest(unittest.TestCase):

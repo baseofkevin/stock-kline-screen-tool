@@ -34,7 +34,11 @@ def turn_cell(label, desc):
 
 
 def csv_row(x):
-    """一只入选股的 CSV 行，顺序与 CSV_HEADER 严格对应（15 列）。"""
+    """一只入选股的 CSV 行，顺序与 CSV_HEADER 严格对应（16 列）。
+
+    「总市值（亿）」取 mv_<d*>.json 的总市值（元）/1e8，四舍五入 2 位；
+    缺失（None）时 r2 输出空串——只展示、不影响名单与排序。
+    """
     return [
         x["code"], x.get("name") or "",
         x.get("sw1") or "未分类", x.get("sw2") or "未分类",
@@ -44,6 +48,7 @@ def csv_row(x):
         x.get("turn20"), x.get("turn20_rank"),
         turn_star(x.get("turn20_rank")),
         r2(x.get("price")),
+        r2(x.get("total_cap_yi")),
     ]
 
 
@@ -54,7 +59,7 @@ def build_result(st):
     csv_path, res_path = st["csv_path"], st["res_path"]
     stats = dict(sorted(st["rej"].items(), key=lambda kv: -kv[1]))
     return {
-        "版本": "v1.9",
+        "版本": "v1.10",
         "基准日": st["S"], "扫描周期K": a.n + 1, "新鲜度窗口N": a.n,
         "覆盖区间": st["need"],
         "参数": {"K_VOL": a.k_vol, "涨幅区间": [a.chg_lo, a.chg_hi],
@@ -66,6 +71,8 @@ def build_result(st):
                                "（listeddate_5days/3mons/1year/3year）",
                  "市值比分母": "d* 日流通市值（与分子同日）",
                  "市值比分母来源": "mv_<d*>.json（screen condition NegotiableMV）",
+                 "总市值列": "mv_<d*>.json 的总市值(元)/1e8，与市值比同日快照，"
+                             "仅展示不参与裁决（v1.10 起）",
                  "行业归属": "申万一级/二级，来源 westock data_sector；"
                              "只展示，不参与裁决（v1.7 起）"},
         "业绩转变参数": {"判定方式": "①毛利率环比改善单项，不合成总分",
