@@ -1,4 +1,4 @@
-"""kline-screan 命令行参数与入口。"""
+"""kline_screen 命令行参数与入口。"""
 import argparse
 import sys
 
@@ -8,7 +8,7 @@ from .pipeline import CliError, run
 
 
 def build_parser():
-    ap = argparse.ArgumentParser(description="K线选股规则 v1.9（每周选股，K=5）")
+    ap = argparse.ArgumentParser(description="K线选股规则 v1.10（每周选股，K=5）")
     ap.add_argument("--date", help="基准交易日（默认最近交易日）")
     ap.add_argument("--n", type=int, default=4,
                     help="新鲜度窗口，必须 = 扫描周期−1（每周 K=5 用 4=默认；"
@@ -28,6 +28,9 @@ def build_parser():
                     help="强制重新下载原始数据（默认复用 database/ 下的已有文件）")
     ap.add_argument("--refresh-industry", action="store_true",
                     help="强制重建申万行业归属表（默认 30 天缓存，约 2~3 分钟）")
+    ap.add_argument("--prune-kline", action="store_true",
+                    help="跑完后只保留最新 2 份 kline 底稿（每份约 65 MB），"
+                         "默认只提示不删除")
     return ap
 
 
@@ -38,3 +41,8 @@ def main(argv=None):
     except CliError as e:
         print(str(e), file=sys.stderr)
         return 1
+    except RuntimeError as e:
+        # run() 里的数据类错误都故意用 RuntimeError 表达「宁可失败也不出不可信名单」。
+        # 这里不打 traceback：用户要的是那句原因，不是调用栈。
+        print(f"\n错误：{e}", file=sys.stderr)
+        return 2

@@ -32,7 +32,6 @@ import datetime as dt
 import glob
 import json
 import os
-import statistics as st
 import sys
 from collections import defaultdict
 
@@ -78,11 +77,15 @@ def horizon_ret(dates, closes, S, target):
 
 
 def limit_pct(code):
-    """涨跌停幅度：主板 10%、创业板/科创板 20%、北交所 30%。"""
+    """涨跌停幅度：主板 10%、创业板/科创板 20%、北交所 30%。
+
+    ⚠️ 代码段要跟着交易所的开板走：sh688 科创板、sh689 科创 CDR、
+    sz300/sz301/sz302 创业板，都是 20%；漏一个就会把 20% 的票标成主板 10%。
+    """
     c = str(code)
     if c.startswith("bj"):
         return 30.0
-    if c.startswith("sh688") or c.startswith("sz300") or c.startswith("sz301"):
+    if c.startswith(("sh688", "sh689", "sz300", "sz301", "sz302")):
         return 20.0
     return 10.0
 
@@ -121,7 +124,7 @@ def load_bars(db):
     store = {}
     files = sorted(glob.glob(os.path.join(db, "kline_*.json")))
     if not files:
-        raise SystemExit(f"错误：{db} 下没有 kline_*.json，先跑 kline-screan.py 或 evaluation/download_history.py")
+        raise SystemExit(f"错误：{db} 下没有 kline_*.json，先跑 kline_screen.py 或 evaluation/download_history.py")
     for path in files:
         try:
             with open(path, encoding="utf-8") as fh:

@@ -42,6 +42,14 @@ class LimitTest(unittest.TestCase):
         self.assertEqual(ev.limit_pct("sh688001"), 20.0)
         self.assertEqual(ev.limit_pct("bj830799"), 30.0)
 
+    def test_limit_pct_covers_cdr_and_new_chinext_segment(self):
+        """sh689（科创 CDR）与 sz302（创业板）都是 20%，漏了就会标成主板 10%。"""
+        self.assertEqual(ev.limit_pct("sh689009"), 20.0)
+        self.assertEqual(ev.limit_pct("sz302132"), 20.0)
+        # 20% 的票涨 12% 不该被认成涨停，但涨 19.9% 必须是「是」
+        self.assertEqual(ev.limit_state(12.0, "sh689009"), "否")
+        self.assertEqual(ev.limit_state(19.9, "sz302132"), "是")
+
     def test_limit_state(self):
         self.assertEqual(ev.limit_state(9.95, "sh600000"), "是")
         self.assertEqual(ev.limit_state(9.6, "sh600000"), "接近")

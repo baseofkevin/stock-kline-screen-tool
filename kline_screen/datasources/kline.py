@@ -12,9 +12,9 @@ from ..common.values import fnum
 from ..common.westock import md, retry, run
 from ..params import (KLINE_BACKOFF_BASE, KLINE_BACKOFF_MAX, KLINE_BAD_LIMIT,
                       KLINE_BATCH, KLINE_DELTA_BATCH, KLINE_FLUSH_EVERY,
-                      KLINE_MAX_BARS, KLINE_PACE_MAX, KLINE_PACE_MIN,
+                      KLINE_KEEP, KLINE_MAX_BARS, KLINE_PACE_MAX, KLINE_PACE_MIN,
                       KLINE_RETRY_BATCH, KLINE_SPLIT_DEPTH, KLINE_SPLIT_MIN,
-                      KLINE_STALE_ROUNDS, MIN_HISTORY)
+                      KLINE_STALE_ROUNDS, KLINE_WARN_FILES, MIN_HISTORY)
 
 
 BAR_ORDER = "date,close,volume,open,high,low,amount"
@@ -31,10 +31,12 @@ def bar_at(bar, idx):
 
 
 def bar_low(bar):
+    """当根最低价；3 元组旧缓存返回 None（为将来的质量过滤预留，当前不参与裁决）。"""
     return bar_at(bar, 5)
 
 
 def bar_high(bar):
+    """当根最高价；3 元组旧缓存返回 None（同上，预留）。"""
     return bar_at(bar, 4)
 
 
@@ -156,6 +158,52 @@ def _kline_meta(path):
     return path[:-5] + ".meta.json" if path.endswith(".json") else path + ".meta.json"
 
 
+def prune_kline_files(keep=KLINE_KEEP, protect=None):
+    """只保留最近 keep 份 kline 底稿（连同 .meta.json），返回被删文件名列表。
+
+    ⚠️ 只在显式加 `--prune-kline` 时调用。每次运行都会新建一份
+    `kline_<新起>_<S>.json`，单份约 65 MB，跑十几期就是几个 GB。
+
+    能安全删除的前提是「新底稿 ⊇ 旧底稿」：get_kline 落盘时保留底稿里的全部
+    代码（不按当期候选裁剪），并且起的 = need[0] − 300 天、止 = S，所以新文件
+    的区间与股票集合都覆盖旧的。protect 传本次刚写完的文件，永不删。
+    """
+    files = _kline_files()                      # 新 → 旧
+    protected = {os.path.abspath(protect)} if protect else set()
+    protected |= {os.path.abspath(p) for _, _, p in files[:keep]}
+    removed = []
+    for _, name, path in files:
+        if os.path.abspath(path) in protected:
+            continue
+        try:
+            os.remove(path)
+        except OSError:
+            continue
+        meta = _kline_meta(path)
+        if os.path.exists(meta):
+            try:
+                os.remove(meta)
+            except OSError:
+                pass
+        removed.append(name)
+    return removed
+
+
+def kline_files_hint(limit=KLINE_WARN_FILES):
+    """底稿份数过多时的一行提示（不删任何文件，只提醒）。"""
+    files = _kline_files()
+    if len(files) < limit:
+        return None
+    size = 0
+    for _, _, path in files:
+        try:
+            size += os.path.getsize(path)
+        except OSError:
+            pass
+    return (f"database/ 下有 {len(files)} 份 kline 底稿（约 {size / 1e6:.0f} MB），"
+            f"可加 --prune-kline 只保留最新 {KLINE_KEEP} 份")
+
+
 def _flush(path, km, end):
     """落盘 K 线，并记下这份底稿是「哪一天收盘定稿」写出来的。
 
@@ -235,6 +283,9 @@ def get_kline(codes, beg, end, refresh, require_codes=None):
     与 download_history.py 照旧可用）。require_codes（通常是 cross[end] 的代码）
     重取后仍缺 end 日 K 时直接报错，不以「K线无 S 数据」静默剔除。
 
+    返回值 km 含**底稿里的全部代码**（不止本次候选），这样后一期底稿总是前一期
+    的超集，清理旧底稿不会让历史个股凭空消失。调用方按自己的 codes 过滤即可。
+
     性能要点（2026-11-08）：
       · **增量取数**：以最新一份 kline_*.json 为底稿，每只只补「最后一根之后」
         新增的交易日。基准日往前挪一天时，4996 只的日增量约 5000 行，而不是
@@ -253,13 +304,17 @@ def get_kline(codes, beg, end, refresh, require_codes=None):
     require_codes = set(require_codes or ())
     path = os.path.join(DB, f"kline_{beg}_{end}.json")
     base = _load_kline_base(path, refresh, end)
-    pool = set(codes)
-    # 只保留本次候选；统一成升序；并**截掉晚于 end 的 K 线**。
-    # 截断这一步是必须的：回看旧日期（--date 早于底稿的截止日）时，底稿里的"未来"
+    # 底稿**不按本次候选裁剪**：候选池每周在变（股票离开池子就会被裁掉），
+    # 若只把本次 pool 写进新文件，每份底稿都只是"那一期池子"的快照，
+    # 后一期不含前一期跌出池子的票 —— evaluate.py 只能靠合并所有文件才凑齐历史，
+    # 清理旧底稿就真的会丢数据（2026-11-11 实测：11-09 底稿比 11-06 底稿少了
+    # sh600109/sh601878/sz301331 三只，回放 11-06 的名单从 155 掉到 152）。
+    # 所以这里保留底稿里的全部代码，只做两件事：统一升序 + 截掉晚于 end 的 K 线。
+    # 截断是必须的：回看旧日期（--date 早于底稿的截止日）时，底稿里的"未来"
     # K 线会让「末日≠end」把每只股票都判成未更新，require_codes 检查会直接报错。
     km = {}
     for c, v in base.items():
-        if c not in pool or not v:
+        if not v:
             continue
         bars = sorted(v, key=lambda b: b[0])
         if bars[-1][0] > end:

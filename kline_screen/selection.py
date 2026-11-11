@@ -133,7 +133,6 @@ def _enrich_market(st):
             "m20_m60": round(x["ma20"] / x["ma60"], 4),
             "float_cap_yi": round(fc / 1e8, 2) if fc else None,
             "total_cap_yi": round(tc / 1e8, 2) if tc is not None else None,
-            "close_cap_day": cap_to_yuan(num("circulating_market_cap")),
             "price": num("price"),
         })
         final.append(x)

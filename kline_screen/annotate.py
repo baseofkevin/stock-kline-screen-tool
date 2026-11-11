@@ -65,6 +65,9 @@ def _write(st):
     S, final = st["S"], st["final"]
     # 展示顺序：池内换手分位升序（最冷在前，方便从低关注度一端开始审核）；
     # 分位为 None（数据不足）的排最后。只影响阅读顺序，不改名单构成。
+    # ⚠️ 这里是**原地排序**（不是 sorted）：CSV 行与 result JSON 的「名单」共用
+    #    同一个 list，靠原地排序保证两份产物顺序一致。改成 sorted() 会让
+    #    CSV 与 JSON 顺序分叉。
     final.sort(key=lambda x: (x.get("turn20_rank") is None,
                               x.get("turn20_rank") or 0.0, x["code"]))
 

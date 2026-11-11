@@ -23,13 +23,17 @@ CAL_SPAN_DAYS = 365 * 4     # 默认回看 4 年（≈970 个交易日），覆�
 def get_trading_days(end, refresh, span=None):
     """交易日列表（单文件缓存）。
 
-    起点按 CAL_SPAN_DAYS 动态回看 4 年。若返回条数触到 CAL_LIMIT 则直接报错，
-    避免结果被截断后 days[-1] 停在过期日期，main() 却继续用过期基准日跑出
-    一份看似正常的名单。
+    起点按 CAL_SPAN_DAYS 动态回看 4 年；调用方可传更早的 span（历史下载用），
+    此时**不再夹到 4 年**——夹了会静默丢掉区间前半段的交易日。区间过宽会撞到
+    CAL_LIMIT，那时显式报错，让人看见而不是默默少几天。
+    返回条数触到 CAL_LIMIT 直接报错，避免结果被截断后 days[-1] 停在过期日期。
+
+    注意：传窄 span 会把缓存改窄，之后选股主流程（span=None → 4 年）会因为
+    span 不匹配重拉一次——一次轻量请求，换来「不静默丢区间」。
     """
     e = dt.date.fromisoformat(end)
     auto = (e - dt.timedelta(days=CAL_SPAN_DAYS)).isoformat()
-    span = auto if span is None else min(span, auto)
+    span = auto if span is None else span
     path = os.path.join(DB, "trading_calendar.json")
     cached = jload(path, {})
     if (not refresh and cached.get("end") == end and cached.get("days")
@@ -141,6 +145,7 @@ def get_quotes(codes, day, refresh):
         out = dict(cached)
     else:
         out = {}
+    fetched = False
     for i in range(0, len(codes), 20):
         ch = [c for c in codes[i:i + 20] if c not in out]
         if not ch:
@@ -152,8 +157,12 @@ def get_quotes(codes, day, refresh):
             c = r.get("code") or r.get("symbol") or (ch[0] if len(ch) == 1 else None)
             if c:
                 out[c] = r
-        jdump(path, out)
+                fetched = True
         time.sleep(0.5)
+    # 落盘放在循环外：停牌核对（_traded_on）可能一次问几百只，逐批写整份文件
+    # 会把同一份 JSON 反复全量重写。一次都没抓到就不碰磁盘。
+    if fetched:
+        jdump(path, out)
     return out
 
 

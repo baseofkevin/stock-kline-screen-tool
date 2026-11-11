@@ -7,10 +7,10 @@ from .annotate import _annotate_industry, _annotate_turnaround, _write
 from .config import CSVDIR, DB, W
 from .common.session import MARKET_CLOSE, session_final
 from .common.values import fnum
-from .datasources.kline import get_kline
+from .datasources.kline import get_kline, kline_files_hint, prune_kline_files
 from .datasources.market import get_cross, get_labels, get_trading_days
 from .output import print_summary
-from .params import KLINE_LOOKBACK_DAYS
+from .params import KLINE_KEEP, KLINE_LOOKBACK_DAYS
 from .selection import _enrich_market, _select
 
 
@@ -69,8 +69,10 @@ def _prepare(st):
             f"      请收盘后重跑，或改用 --date {prev or '上一交易日'}。")
     if a.chg_lo > a.chg_hi:
         raise CliError(f"错误：--chg-lo {a.chg_lo} > --chg-hi {a.chg_hi}")
-    if not (0 <= a.turn_pct <= 1):
-        raise CliError("错误：--turn-pct 必须在 0~1（0=关闭；0.2/0.4/0.6=保留最低比例）")
+    # 上界是开区间：apply_turnover 用 `0 < pct < 1` 判硬过滤，pct=1 会静默变成
+    # 「只排序不剔除」，和用户「留 100%」的预期不符，直接拒绝更诚实。
+    if not (0 <= a.turn_pct < 1):
+        raise CliError("错误：--turn-pct 必须在 [0,1)（0=关闭；0.2/0.4/0.6=保留池内最低比例）")
     if a.turn_min < 0 or a.turn_max < a.turn_min:
         raise CliError(
             f"错误：--turn-min/--turn-max 不合法（{a.turn_min}/{a.turn_max}）")
@@ -155,3 +157,22 @@ def _load_kline(st):
               f"{', '.join(km_missing[:8])}{'…' if len(km_missing) > 8 else ''}")
     st.update({"pool": pool, "pool_n": len(pool), "km": km,
                "km_missing": km_missing})
+    # 放在所有门禁之后：取数失败（抛 RuntimeError）时不要顺手删旧底稿
+    _maybe_prune_kline(a, os.path.join(DB, f"kline_{kbeg}_{S}.json"))
+
+
+def _maybe_prune_kline(a, current_path):
+    """底稿清理：只在 --prune-kline 时真的删，其余情况只提示。
+
+    每次运行都会新建一份约 65 MB 的 kline 底稿，不清理的话 database/ 会一直涨；
+    但删数据是不可逆动作，所以默认只提示、不自动删。
+    """
+    if getattr(a, "prune_kline", False):
+        removed = prune_kline_files(KLINE_KEEP, protect=current_path)
+        if removed:
+            print(f"      已清理 {len(removed)} 份旧底稿（保留最新 {KLINE_KEEP} 份）："
+                  f"{', '.join(removed[:3])}{'…' if len(removed) > 3 else ''}")
+        return
+    hint = kline_files_hint()
+    if hint:
+        sys.stderr.write(f"      ⚠️ {hint}\n")

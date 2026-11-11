@@ -1,21 +1,53 @@
 """20 日换手、池内分位与硬过滤。"""
 from ..params import TURN_MIN_COVER, TURN_WINDOW
 
+#: volume 单位是「股」的代码前缀。科创板 sh688 与其 CDR sh689 都是「股」，
+#: 其余板块（sh600/601/603/605、sz000/001/002/003/300/301/302、bj）是「手」。
+#: 实测（2026-11）amount ÷ (volume × close)：sh688/sh689 ≈ 1.0，其余 ≈ 100。
+STAR_PREFIXES = ("sh688", "sh689")
 
-def volume_to_shares(code, volume):
+
+def unit_from_prefix(code):
+    """按代码段推断 volume 的单位倍数：1 = 股，100 = 手。"""
+    return 1.0 if str(code).startswith(STAR_PREFIXES) else 100.0
+
+
+def infer_unit(code, bars):
+    """用「有 amount 的 bar」反推该股 volume 的单位倍数；无法判定返回 None。
+
+    为什么不能只靠前缀表：代码段会新增（sh689 CDR 就是漏掉过的例子），
+    而 3 元组旧缓存与新抓的 7 元组混在一起时，同一只票的两种 bar 都得换算对。
+    amount ÷ (close × volume) 落在 1 附近是「股」、落在 100 附近是「手」，
+    用股票自己的成交数据标定，比维护前缀表稳。
+    """
+    for b in bars or ():
+        if len(b) > 6 and b[6] and b[1] and b[2]:
+            try:
+                ratio = float(b[6]) / (float(b[1]) * float(b[2]))
+            except (TypeError, ValueError, ZeroDivisionError):
+                continue
+            if 0.5 <= ratio <= 2:
+                return 1.0
+            if 20 <= ratio <= 500:
+                return 100.0
+    return None
+
+
+def volume_to_shares(code, volume, unit=None):
     """接口返回的 volume → 「股」。
 
-    ⚠️ 实测（2026-11）：科创板 sh688 的 volume 单位是「股」，
+    ⚠️ 实测（2026-11）：科创板 sh688 与科创 CDR sh689 的 volume 单位是「股」，
     其余板块是「手」（100 股）。amount ÷ (volume × close) ≈ 1.0 vs ≈100。
     任何「成交额/换手率」计算都必须过这一层，否则科创板会被高估 100 倍。
+    unit 由调用方用 infer_unit() 标定后传入；缺省按代码段判断。
     """
     if volume is None:
         return None
     v = float(volume)
-    return v if str(code).startswith("sh688") else v * 100
+    return v * (unit if unit else unit_from_prefix(code))
 
 
-def bar_amount(code, bar):
+def bar_amount(code, bar, unit=None):
     """单根 K 线的成交额（元）：有 amount 字段就直接用，否则 close×volume 估算。"""
     if len(bar) > 6 and bar[6] is not None:
         try:
@@ -25,7 +57,7 @@ def bar_amount(code, bar):
     if len(bar) < 3 or bar[1] is None or bar[2] is None:
         return None
     try:
-        return float(bar[1]) * volume_to_shares(code, bar[2])
+        return float(bar[1]) * volume_to_shares(code, bar[2], unit)
     except (TypeError, ValueError):
         return None
 
@@ -39,12 +71,14 @@ def turnover20(code, bars, cal20, cap_yuan):
     if not bars or not cap_yuan:
         return None, 0
     by_day = {b[0]: b for b in bars if b and b[0]}
+    # 单位标定优先用该股自己的成交数据（混合缓存下也正确），无 amount 可比时退回代码段
+    unit = infer_unit(code, bars) or unit_from_prefix(code)
     amts = []
     for d in cal20:
         b = by_day.get(d)
         if b is None:
             continue
-        a = bar_amount(code, b)
+        a = bar_amount(code, b, unit)
         if a is not None:
             amts.append(a)
     if len(amts) < TURN_MIN_COVER:
@@ -97,7 +131,7 @@ def apply_turnover(hits, pool_codes, km, cap_snapshot, cal20,
     if not (0 < pct_base < 1):
         return hits, {"启用": False, "模式": "仅排序/标注", "窗口": TURN_WINDOW,
                       "池内样本": m,
-                      "原因": "--turn-pct=0，换手只参与排序，不剔除"}, []
+                      "原因": f"--turn-pct={pct_base:g}，换手只参与排序，不剔除"}, []
     if m < 20:
         return hits, {"启用": False, "模式": "仅排序/标注", "窗口": TURN_WINDOW,
                       "池内样本": m,

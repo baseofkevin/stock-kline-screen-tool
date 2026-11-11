@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""kline-screan.py —— K 线选股入口。
+"""kline_screen.py —— K 线选股入口。
 
 规则与输出说明见 README.md。
 """

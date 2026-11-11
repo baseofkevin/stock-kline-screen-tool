@@ -15,6 +15,94 @@
 
 ---
 
+## 2026-11-11 11:20 +08:00
+
+代码评审后的修复批次（版本号不变，仍为 v1.10：名单构成、规则阈值、CSV 列数均未变）。
+
+### 修复
+
+- **`evaluation/download_history.py` 整条链路不可用（P0）**：脚本 `from kline_screen import
+  params as RULE` 后调用了 `RULE.get_trading_days` / `RULE.cross_sig` / `RULE.to_bar`，
+  但 `params.py` 只有常量，这三处一律 `AttributeError`——任何参数组合都在第 2 步
+  「横截面粗筛」崩，`evaluate.py --fetch` 同样不可用。
+  改为从 `datasources.market` 导入 `cross_sig/get_trading_days`、从 `datasources.kline`
+  导入 `to_bar`，4 处调用点同步改名。
+- **科创板 CDR（`sh689`）成交量单位判错**：`volume_to_shares()` 只认 `sh688`，
+  而实测 `amount ÷ (volume × close)` 在 `sh689009` 上也是 ≈1.0（单位是「股」，
+  其余板块 ≈100「手」）。落到 3 元组旧缓存路径时换手会被放大 100 倍。
+  现在：新增 `STAR_PREFIXES=("sh688","sh689")`；并新增 `infer_unit()` 用该股自己有
+  `amount` 的 bar 反推单位（≈1 → 股、≈100 → 手），混合缓存（3 元组 + 7 元组）也换算正确，
+  将来新增代码段不必再改表。
+- **`evaluation/evaluate.py` 涨跌停幅度漏板块**：`limit_pct()` 现在覆盖 `sh689`（科创 CDR）
+  与 `sz302`（创业板），两者都是 20%；此前会被当成主板 10%，导致「启动日涨停」标注错。
+- **K 线底稿按当期候选裁剪，新底稿不是旧底稿的超集**：`get_kline()` 落盘时改为保留
+  底稿里的全部代码，只做「升序 + 截掉晚于 end 的 bar」。原先按 `pool` 过滤，
+  跌出候选池的股票会在新底稿里消失——实测 11-09 底稿比 11-06 底稿少
+  `sh600109/sh601878/sz301331` 三只，用 11-09 底稿回放 11-06 时名单从 155 掉到 152。
+- `common/values.cap_to_yuan()` 入口加 `fnum`：接口返回的是字符串，
+  直接与 `1e6` 比较会 `TypeError`。
+- `pipeline._prepare()`：`--turn-pct` 上界由 `<=1` 收紧为 `<1`。`pct=1` 会被
+  `apply_turnover()` 的 `0 < pct < 1` 当成「不过滤」，与「保留 100%」的直觉不符。
+- `cli.main()` 增加 `RuntimeError` 捕获并返回退出码 2：run() 里所有数据类错误都用
+  RuntimeError 表达「宁可失败也不出不可信名单」，此前用户看到的是整屏 traceback。
+- `datasources.market.get_quotes()`：落盘移出批次循环（一次都没抓到则不写盘）。
+  停牌核对 `_traded_on()` 可能一次问几百只，逐批重写整份 JSON 是纯浪费。
+- `datasources.market.get_trading_days()`：不再把调用方传入的 `span` 夹到 4 年。
+  夹了会让 `download_history --start` 早于 4 年前时静默丢掉前半段交易日；
+  区间过宽会撞 `CAL_LIMIT` 并显式报错。
+- `output.build_result()`：「数据是否可用」改为 `bool(turn)`，空池（`turn={}`）
+  不再写成 true。
+- `metrics.turnover.apply_turnover()`：「仅排序/标注」的原因文案不再写死
+  `--turn-pct=0`，按实际传入值打印。
+
+### 新增
+
+- **`--prune-kline`**：跑完后只保留最新 `KLINE_KEEP=2` 份 K 线底稿（连同 `.meta.json`），
+  默认**只提示不删除**（超过 `KLINE_WARN_FILES=4` 份时在 stderr 提示体积与命令）。
+  新增 `datasources.kline.prune_kline_files()` / `kline_files_hint()`，
+  `params` 新增两个常量。起因：`database/` 已 347 MB，其中 5 份底稿约 213 MB 且高度重复。
+- `tests/test_screen.py`：新增 `KlinePruneTest`（清理只删旧文件、保护本次底稿、
+  `.meta.json` 跟着删、meta 不被当底稿计数）、`DownloadHistoryHelpersTest.
+  test_download_functions_are_imported`（断言函数真能导入，替换原先只查常量的弱断言）、
+  换手单位三条（sh688/sh689/主板、amount 标定、无 amount 退回前缀）、
+  `cap_to_yuan` 字符串入参。
+- `tests/test_evaluate.py`：`limit_pct` 覆盖 `sh689`/`sz302` 及对应 `limit_state`。
+- `tests/test_e2e_replay.py`：`pick_kline_file()` 不再硬编码
+  `kline_2026-01-06_2026-11-06.json`（清理旧底稿后会静默 skip），改按「截止日 == 基准日
+  优先、同截止日取写入时间最新」挑选；`_fake_quotes()` 取 ≤day 的最后一根
+  （底稿可能比 day 更新）；非法参数用例补 `--turn-pct 1`。
+
+### 删除
+
+- `result_<基准日>.json`「名单」里的 `close_cap_day` 字段（`selection.py`）：
+  从未被任何代码或 `evaluate.py` 读取，且容易与 `float_cap_yi` 混淆——
+  前者是 quote 快照市值、后者是 `mv_<d*>` 的流通市值。
+- `evaluation/evaluate.py` 未使用的 `import statistics as st`。
+
+### 文档
+
+- `README.md`：修正「停牌股 age 偏小 → 会被新鲜度判掉」的方向错误（实际是 ③ 的
+  窗口检查拦截）；`total_market_cap` 并不存在所谓「行情字段防线」；成交量单位补
+  `sh689` 与标定逻辑；补齐 `--prune-kline` 参数、`KLINE_KEEP/KLINE_WARN_FILES` 常量、
+  市值快照请求次数、`--turn-pct` 取值区间 `[0,1)`；底稿说明改为「保留底稿全部代码」；
+  「每周约 7 只」改为实测「2～155 只，中位数约 18」；新增 FAQ「为什么 database/ 越来越大」
+  与「跑到一半被 Ctrl-C 了，底稿会不会坏」（增量是按每只股票的最后一根 K 线判断，
+  中断的底稿下次自动补齐，无需 `--refresh`；只有 `final: false` 的半成品 bar 会被丢弃）。
+- 版本号与旧文件名：`cli.py` 帮助由 `v1.9` 改为 `v1.10`；
+  `kline_screen.py`、`cli.py`、`evaluate.py`、`download_history.py` 里的
+  `kline-screan` 全部改为 `kline_screen`。
+- 全套 **87 个测试通过**（原 80，新增 7 个）。
+
+### 影响
+
+- 名单构成、规则阈值、CSV 列数、排序口径**均未改变**；用 2026-11-06 缓存回放，
+  名单与 `database/result_2026-11-06.json` 完全一致（155 只、顺序相同）。
+- `result_*.json` 的「名单」少了 `close_cap_day` 一个字段；其余字段与版本号不变。
+- 历史 `kline_*.json` 是旧逻辑写的（非超集），首次跑 `--prune-kline` 前建议保留
+  至少最近两份；如需更早的个股覆盖，先跑一次 `evaluation/download_history.py`。
+
+---
+
 ## 2026-11-10 21:42 +08:00
 
 ### 新增

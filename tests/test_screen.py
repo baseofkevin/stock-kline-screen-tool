@@ -27,11 +27,13 @@ from kline_screen.common.values import (cap_to_yuan, end_date,  # noqa: E402
                                         prev_quarter, pub_date)
 from kline_screen.common.westock import md  # noqa: E402
 from kline_screen.datasources import industry as industry_mod  # noqa: E402
+from kline_screen.datasources import kline as kline_mod  # noqa: E402
 from kline_screen.datasources.kline import (bar_at, bar_high, bar_low,  # noqa: E402
                                             to_bar)
 from kline_screen.datasources.market import cross_sig  # noqa: E402
 from kline_screen.metrics.turnover import (annotate_turnover,  # noqa: E402
-                                           apply_turnover)
+                                           apply_turnover, bar_amount,
+                                           infer_unit, volume_to_shares)
 from kline_screen.output import csv_row, turn_cell, turn_star  # noqa: E402
 from kline_screen.rules import find_start, judge  # noqa: E402
 
@@ -102,6 +104,13 @@ class ScreenHelpersTest(unittest.TestCase):
         self.assertIsNone(cap_to_yuan(None))
         self.assertAlmostEqual(cap_to_yuan(100), 100 * 1e8)
         self.assertAlmostEqual(cap_to_yuan(10_000_000), 10_000_000)
+
+    def test_cap_to_yuan_accepts_strings_and_junk(self):
+        """接口给的是字符串，不能直接和 1e6 比大小（会 TypeError）。"""
+        self.assertAlmostEqual(cap_to_yuan("40.26"), 40.26 * 1e8)
+        self.assertAlmostEqual(cap_to_yuan("4263000000"), 4263000000)
+        self.assertIsNone(cap_to_yuan(""))
+        self.assertIsNone(cap_to_yuan("--"))
 
     def test_cross_sig_is_stable_and_param_sensitive(self):
         a = cross_sig(0.5, 20.5)
@@ -263,6 +272,24 @@ class TurnoverTest(unittest.TestCase):
     def _bars(self, amount):
         return [(d, 10.0, 100.0, 10.0, 10.0, 10.0, amount) for d in self.CAL]
 
+    def test_volume_unit_star_and_cdr(self):
+        """sh688 与 sh689 的 volume 是「股」，其余是「手」——差 100 倍。"""
+        self.assertEqual(volume_to_shares("sh688001", 1000), 1000)
+        self.assertEqual(volume_to_shares("sh689009", 1000), 1000)   # CDR，曾经漏判
+        self.assertEqual(volume_to_shares("sh600000", 1000), 100_000)
+        self.assertEqual(volume_to_shares("sz302132", 1000), 100_000)
+        self.assertIsNone(volume_to_shares("sh600000", None))
+
+    def test_volume_unit_prefers_amount_calibration(self):
+        """有 amount 时用股票自己的数据标定单位，混合缓存（3 元组 + 7 元组）也不错。"""
+        # 这只票的 amount 显示 volume 其实是「手」（尽管代码段是 sh689）
+        bars = [("D000", 10.0, 1000.0, 10.0, 10.0, 10.0, 10.0 * 1000 * 100)]
+        self.assertEqual(infer_unit("sh689009", bars), 100.0)
+        old = ("D001", 10.0, 1000.0)          # 3 元组旧 bar，没有 amount
+        self.assertEqual(bar_amount("sh689009", old, 100.0), 10.0 * 1000 * 100)
+        # 没有 amount 可比时退回代码段
+        self.assertIsNone(infer_unit("sh689009", [("D001", 10.0, 1000.0)]))
+
     def _pool(self):
         # 30 只，换手从 0.1% 线性到 3.0%
         return {f"sh60{i:04d}": self._bars(1e6 * (i + 1)) for i in range(30)}
@@ -313,6 +340,61 @@ class TurnoverTest(unittest.TestCase):
         self.assertEqual(dropped, [])
 
 
+class KlinePruneTest(unittest.TestCase):
+    """底稿清理：只删旧文件，本次刚要写的那份永不删。"""
+
+    def _touch(self, tmp, end, size=8):
+        name = f"kline_2026-01-06_{end}.json"
+        path = Path(tmp) / name
+        path.write_text("{}" * size, encoding="utf-8")
+        (Path(tmp) / name.replace(".json", ".meta.json")).write_text("{}", encoding="utf-8")
+        return name
+
+    def test_prune_keeps_newest_and_protected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            names = [self._touch(tmp, d) for d in
+                     ("2026-10-30", "2026-11-02", "2026-11-05", "2026-11-06")]
+            saved = kline_mod.DB
+            kline_mod.DB = tmp
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    removed = kline_mod.prune_kline_files(keep=2)
+                left = sorted(f.name for f in Path(tmp).glob("kline_*_*.json")
+                              if not f.name.endswith(".meta.json"))
+                self.assertEqual(len(left), 2)
+                self.assertIn(names[-1], left)          # 最新一份必须留
+                self.assertIn(names[-2], left)
+                self.assertEqual(len(removed), 2)
+                # .meta.json 跟着删，不能留孤儿
+                self.assertEqual(len(list(Path(tmp).glob("kline_*.meta.json"))), 2)
+                # protect 的文件即使超出 keep 也不删
+                extra = self._touch(tmp, "2026-10-28")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    removed2 = kline_mod.prune_kline_files(
+                        keep=1, protect=str(Path(tmp) / extra))
+                self.assertNotIn(extra, removed2)
+                self.assertTrue((Path(tmp) / extra).exists())
+            finally:
+                kline_mod.DB = saved
+
+    def test_prune_ignores_meta_and_hint_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._touch(tmp, "2026-11-06")
+            saved = kline_mod.DB
+            kline_mod.DB = tmp
+            try:
+                self.assertIsNone(kline_mod.kline_files_hint(limit=2))
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    hint = kline_mod.kline_files_hint(limit=1)
+                self.assertIn("--prune-kline", hint)
+                # meta 文件不能被当底稿数进去
+                self.assertEqual(len(kline_mod._kline_files()), 1)
+            finally:
+                kline_mod.DB = saved
+
+
 class AtomicWriteTest(unittest.TestCase):
     def test_json_atomic_write(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -350,6 +432,23 @@ class DownloadHistoryHelpersTest(unittest.TestCase):
     def test_rule_constants(self):
         self.assertTrue(hasattr(dh.RULE, "CROSS_TPL"))
         self.assertEqual(dh.CROSS_TPL, p.CROSS_TPL)
+
+    def test_download_functions_are_imported(self):
+        """下载脚本用到的函数必须真能从包内导入。
+
+        ⚠️ 曾经这里只断言 `dh.RULE.CROSS_TPL` 存在就通过了，但 `params` 只有常量，
+        `RULE.get_trading_days / cross_sig / to_bar` 全是 AttributeError，
+        整条历史下载链路（含 evaluate.py --fetch）直接不可用。断言函数本身才算数。
+        """
+        for name in ("to_bar", "cross_sig", "get_trading_days"):
+            with self.subTest(name=name):
+                self.assertTrue(callable(getattr(dh, name)), f"{name} 未正确导入")
+        # to_bar 必须落到 7 元组，下游 bar_amount / evaluate 都按这个位置读
+        bar = dh.to_bar({"date": "2026-01-05", "last": 10.0, "volume": 100})
+        self.assertEqual(bar, ("2026-01-05", 10.0, 100.0, None, None, None, None))
+        # 与选股主流程共用同一个签名，否则缓存会被判成「参数已变」反复重拉
+        self.assertEqual(dh.cross_sig(p.CHG_LO, p.CHG_HI),
+                         cross_sig(p.CHG_LO, p.CHG_HI))
 
     def test_json_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:

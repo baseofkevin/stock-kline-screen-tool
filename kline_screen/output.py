@@ -79,7 +79,8 @@ def build_result(st):
                          "①毛利率环比季数": 2,
                          "①营收环比不为负": True,
                          "①最新单季毛利率高于上年同季": TURN_GM_REQUIRE_YOY,
-                         "数据是否可用": turn is not None,
+                         # 空池 / 全部失败时 turn 是 {} 或 None，都不算「可用」
+                         "数据是否可用": bool(turn),
                          "缺失代码": st["turn_failed"]},
         "粗筛池": st["pool_n"], "入选数": len(st["final"]),
         # 剔除非（兼容旧字段）/ 剔除统计 为同一份归一化聚合

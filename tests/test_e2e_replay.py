@@ -23,6 +23,7 @@ import contextlib
 import csv
 import io
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -56,11 +57,34 @@ def _required_files(days):
         f"finance_{S}.json",
         f"finance_ratio_{S}.json",
         "industry_map.json",
-        "kline_2026-01-06_2026-11-06.json",
     ]
     names += [f"cross_{d}.json" for d in days]
     names += [f"labels_{d}.json" for d in days]
     return [DB / n for n in names]
+
+
+def pick_kline_file(day=S):
+    """挑一份覆盖 day 的 kline 底稿（不写死文件名）。
+
+    底稿名随时间滚动（kline_<起>_<止>.json 每期一份），写死文件名会让清理旧
+    底稿后的回放静默 skip —— skip 不等于通过。
+
+    选择顺序：截止日 == day 优先（就是当天跑出来的底稿，结果可复现）；
+    同截止日有多份时按写入时间取最新（旧代码写的底稿会少票）；
+    没有正好的才退到「截止日 > day」的最新一份。
+    """
+    cands = []
+    for path in DB.glob("kline_*_*.json"):
+        m = re.match(r"kline_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.json$", path.name)
+        if not m or m.group(2) < day:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        cands.append((m.group(2) != day, -mtime, path))
+    cands.sort()
+    return cands[0][2] if cands else None
 
 
 class ReplayPipelineTest(unittest.TestCase):
@@ -78,12 +102,16 @@ class ReplayPipelineTest(unittest.TestCase):
             raise unittest.SkipTest(
                 "缺少端到端回放所需缓存：" + "、".join(missing[:6])
                 + ("…" if len(missing) > 6 else ""))
+        kline = pick_kline_file(S)
+        if kline is None:
+            raise unittest.SkipTest(f"没有覆盖 {S} 的 kline_*.json 底稿")
+        cls.KLINE_FILE = kline
         cls.DAYS = days
         cls.NEED = need
         cls.CROSS = {d: _load(DB / f"cross_{d}.json", []) for d in need}
         cls.LABELS = {d: _load(DB / f"labels_{d}.json", {"st": [], "new": []})
                       for d in need}
-        cls.KL = _load(DB / "kline_2026-01-06_2026-11-06.json", {})
+        cls.KL = _load(cls.KLINE_FILE, {})
         cls.MV = _load(DB / f"mv_{S}.json", {})
         cls.FIN = _load(DB / f"finance_{S}.json", {})
         cls.RAT = _load(DB / f"finance_ratio_{S}.json", {})
@@ -153,8 +181,9 @@ class ReplayPipelineTest(unittest.TestCase):
             if row:
                 out[c] = dict(row)
                 continue
-            # 行情缓存只覆盖上次入选名单：用 K 线收盘 + 市值补一份
-            bars = self.KL.get(c) or []
+            # 行情缓存只覆盖上次入选名单：用 K 线收盘 + 市值补一份。
+            # 取 ≤ day 的最后一根，底稿可能比 day 更新（不能直接 bars[-1]）。
+            bars = [b for b in (self.KL.get(c) or []) if b[0] <= day]
             cap = (self.MV.get(c) or [None])[0]
             if bars and cap:
                 out[c] = {"code": c, "price": str(bars[-1][1]),
@@ -307,6 +336,7 @@ class ReplayPipelineTest(unittest.TestCase):
             "非交易日": dict(date="2026-11-07"),
             "--n 为负": dict(n=-1),
             "--turn-pct 越界": dict(turn_pct=1.5),
+            "--turn-pct 等于 1": dict(turn_pct=1.0),
             "涨幅区间反转": dict(chg_lo=21.0, chg_hi=1.0),
         }
         for name, kw in cases.items():

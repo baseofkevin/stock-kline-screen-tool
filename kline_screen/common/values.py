@@ -16,7 +16,11 @@ def r2(v):
 
 def cap_to_yuan(v):
     """⚠️ quote 的市值字段单位随 --date 变化：无 --date 为亿元，有 --date 为元。
-    这里按数量级统一归一化为「元」。"""
+    这里按数量级统一归一化为「元」。
+
+    先过 fnum：接口给的是字符串（"40.26"），直接与 1e6 比大小会 TypeError。
+    """
+    v = fnum(v)
     if v is None:
         return None
     return v if v > 1e6 else v * 1e8

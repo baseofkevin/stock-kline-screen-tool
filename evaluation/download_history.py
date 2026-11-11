@@ -22,10 +22,10 @@
       重试仍失败则该阶段中止，**不会静默留下残缺数据**
     · 每步显示进度与预计剩余时间
 
-产物（全部落在 database/，与 kline-screan.py 的命名保持一致，可被其直接复用）：
+产物（全部落在 database/，与 kline_screen.py 的命名保持一致，可被其直接复用）：
     cross_<交易日>.json        横截面粗筛原始返回              × 每个交易日
     labels_<交易日>.json       排除集（ST + 4 个次新分桶）      × 每个交易日
-    kline_<起>_<止>.json       候选并集的日K线（**一个宽区间**）  × 1
+    kline_<起>_<止>.json       日K线底稿（含底稿内全部代码，**一个宽区间**） × 1
     mv_<基准日>.json           流通市值/总市值 {code: [流通,总]}  × 每 5 日一个口径
     history_meta.json          本次下载清单与统计
 
@@ -41,14 +41,19 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)          # kline-screan.py 与 database/ 都在项目根目录
+ROOT = os.path.dirname(HERE)          # kline_screen.py 与 database/ 都在项目根目录
 DB = os.path.join(ROOT, "database")
 W = os.path.expanduser("~/.local/bin/westock")
 
-# ---- 规则常量直接从 kline_screen.params 取，保证下载口径与选股规则一致 ----
+# ---- 规则常量与取数函数直接从 kline_screen 取，保证下载口径与选股规则一致 ----
+# ⚠️ params 只有常量；函数在 datasources 里。把函数也写成 RULE.xxx 会 AttributeError
+#    （2026-11-11 修复：原先 RULE.get_trading_days / RULE.cross_sig / RULE.to_bar 全都不存在，
+#     导致本脚本任何参数组合都在第 2 步崩，evaluate.py --fetch 同样不可用）。
 sys.path.insert(0, ROOT)
 from kline_screen import params as RULE  # noqa: E402
 from kline_screen.common.session import cache_final, session_final  # noqa: E402
+from kline_screen.datasources.kline import to_bar  # noqa: E402
+from kline_screen.datasources.market import cross_sig, get_trading_days  # noqa: E402
 
 CROSS_TPL = RULE.CROSS_TPL            # 横截面粗筛表达式（6 个条件，短表达式，历史日期可用）
 NEW_LABELS = RULE.NEW_LABELS          # 4 个次新分桶
@@ -91,7 +96,7 @@ def retry(fn, what, tries=RETRIES, backoff=(5, 15, 30, 60), allow_empty=False):
 
     allow_empty=True 时，空结果视为**成功但为空**（只用于「空结果本身合法」的
     场景，如标签分页的第 2 页起）；默认 False，因为历史日期接口会把失败静默
-    表现为空列表。本参数与 kline-screan 的 retry() 保持同一语义。"""
+    表现为空列表。本参数与 kline_screen 的 retry() 保持同一语义。"""
     for i in range(tries):
         try:
             r = fn()
@@ -143,7 +148,9 @@ def download_calendar(start, end, refresh):
     # 缓存已覆盖整个区间就直接用，避免把已有日历缓存改窄
     if not refresh and allc and allc[0] <= start and allc[-1] >= end:
         return [d for d in allc if start <= d <= end]
-    grid = RULE.get_trading_days(end, refresh, span=start)
+    grid = get_trading_days(end, refresh, span=start)
+    if not grid:
+        raise RuntimeError(f"交易日历为空（{start} ~ {end}），不得留下残缺数据")
     return [d for d in grid if start <= d <= end]
 
 
@@ -154,7 +161,7 @@ def download_cross(days, refresh):
     for d in days:
         path = os.path.join(DB, f"cross_{d}.json")
         meta_path = os.path.join(DB, f"cross_{d}.meta.json")
-        sig = RULE.cross_sig(lo, hi)
+        sig = cross_sig(lo, hi)
         meta = jload(meta_path, {})
         if (os.path.exists(path) and not refresh
                 and meta.get("sig") == sig
@@ -167,7 +174,7 @@ def download_cross(days, refresh):
         if rows is None:
             raise RuntimeError(f"横截面粗筛失败：{d}（不得留下残缺数据）")
         jdump(path, rows)
-        # 与 kline-screan.py 的缓存签名保持一致，避免下载脚本写数据、
+        # 与 kline_screen.py 的缓存签名保持一致，避免下载脚本写数据、
         # 选股脚本却因 meta 缺失/过期而重拉。
         jdump(meta_path, {"sig": sig,
                           "version": RULE.CROSS_CACHE_VERSION,
@@ -249,7 +256,7 @@ def _fetch_one(code, beg, end):
     out = []
     for r in rows:
         try:
-            out.append(RULE.to_bar(r))
+            out.append(to_bar(r))
         except (KeyError, ValueError):
             continue
     return sorted(out, key=lambda b: b[0]) if out else None
@@ -279,7 +286,7 @@ def download_kline(codes, beg, end, refresh, batch=KLINE_BATCH, flush_every=10):
                 if not c:
                     continue
                 try:
-                    km.setdefault(c, []).append(RULE.to_bar(r))
+                    km.setdefault(c, []).append(to_bar(r))
                     touched.add(c)
                 except (KeyError, ValueError):
                     continue
