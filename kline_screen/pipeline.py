@@ -4,6 +4,7 @@ import os
 import sys
 
 from .annotate import _annotate_industry, _annotate_turnaround, _write
+from .common import dbclean
 from .config import CSVDIR, DB, W
 from .common.session import MARKET_CLOSE, session_final
 from .common.values import fnum
@@ -32,6 +33,32 @@ def run(a):
     _write(st)
     print_summary(st)
     return 0
+
+
+def clean_db(a, protect_mtime_within=600):
+    """名单已落盘且校验通过后，清掉 database/ 里下次用不上的文件。
+
+    ⚠️ **不在 run() 里调用**，由 cli.main() 在 run() 成功返回后调。
+    原因：run() 也会被测试和外部脚本调用（tests/test_e2e_replay.py 直接调
+    pipeline.run），那里用的是真实的 database/ fixture，若在 run() 里删文件，
+    测试会把 fixture 删掉、后续用例全部失败。
+
+    为什么默认自动清理：database/ 里没有最终产物（最终产物是 csv_output），
+    全是中间缓存；不自动清就会只增不减（每周约 +66 MB，一年 3.4 GB）。
+    保留口径见 common/dbclean.py：kline 底稿留最新 KLINE_KEEP 份、
+    逐日缓存留最近 14 天、常驻文件永不删。`--no-clean` 可关闭。
+
+    protect_mtime_within：本次运行刚写的文件（默认 10 分钟内）一律不删，
+    这样不必知道具体的 kline 文件名也不会误删刚写好的底稿。
+    """
+    if getattr(a, "no_clean", False):
+        print("      已跳过 database/ 清理（--no-clean）")
+        return
+    try:
+        dbclean.clean(protect_mtime_within=protect_mtime_within)
+    except Exception as exc:        # 清理失败绝不影响已产出的名单
+        sys.stderr.write(f"      ⚠️ database/ 清理失败（不影响名单）：{exc}\n")
+
 
 
 def _prepare(st):
@@ -156,23 +183,8 @@ def _load_kline(st):
         print(f"      ⚠️ {len(km_missing)} 只取不到K线，将按「无K线数据」剔除："
               f"{', '.join(km_missing[:8])}{'…' if len(km_missing) > 8 else ''}")
     st.update({"pool": pool, "pool_n": len(pool), "km": km,
-               "km_missing": km_missing})
-    # 放在所有门禁之后：取数失败（抛 RuntimeError）时不要顺手删旧底稿
-    _maybe_prune_kline(a, os.path.join(DB, f"kline_{kbeg}_{S}.json"))
-
-
-def _maybe_prune_kline(a, current_path):
-    """底稿清理：只在 --prune-kline 时真的删，其余情况只提示。
-
-    每次运行都会新建一份约 65 MB 的 kline 底稿，不清理的话 database/ 会一直涨；
-    但删数据是不可逆动作，所以默认只提示、不自动删。
-    """
-    if getattr(a, "prune_kline", False):
-        removed = prune_kline_files(KLINE_KEEP, protect=current_path)
-        if removed:
-            print(f"      已清理 {len(removed)} 份旧底稿（保留最新 {KLINE_KEEP} 份）："
-                  f"{', '.join(removed[:3])}{'…' if len(removed) > 3 else ''}")
-        return
+               "km_missing": km_missing, "kbeg": kbeg})
+    # 旧底稿提示保留（--prune-kline 的实际删除已并入 dbclean，见 _clean_db）
     hint = kline_files_hint()
     if hint:
         sys.stderr.write(f"      ⚠️ {hint}\n")

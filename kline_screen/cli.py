@@ -4,7 +4,7 @@ import sys
 
 from .params import (CHG_HI, CHG_LO, K_VOL, MA60_GAP, TURN_MAX_N, TURN_MIN_N,
                      TURN_PCT)
-from .pipeline import CliError, run
+from .pipeline import CliError, clean_db, run
 
 
 def build_parser():
@@ -29,15 +29,25 @@ def build_parser():
     ap.add_argument("--refresh-industry", action="store_true",
                     help="强制重建申万行业归属表（默认 30 天缓存，约 2~3 分钟）")
     ap.add_argument("--prune-kline", action="store_true",
-                    help="跑完后只保留最新 2 份 kline 底稿（每份约 65 MB），"
-                         "默认只提示不删除")
+                    help="兼容保留：kline 底稿清理已并入默认的 database/ 清理"
+                         "（只留最新 KLINE_KEEP 份），该参数不再需要")
+    ap.add_argument("--no-clean", action="store_true",
+                    help="跑完后不清理 database/（默认会删掉下次用不上的旧缓存："
+                         "kline 底稿留最新 2 份、逐日缓存留最近 14 天）")
+    ap.add_argument("--clean-dry-run", action="store_true",
+                    help="只打印 database/ 会删哪些文件，不真删、也不跑选股")
     return ap
 
 
 def main(argv=None):
     a = build_parser().parse_args(argv)
+    if getattr(a, "clean_dry_run", False):
+        # 只预演清理，不跑选股：排查「删了会不会影响下次」时用
+        from .common import dbclean
+        dbclean.clean(dry_run=True, quiet=False)
+        return 0
     try:
-        return run(a)
+        code = run(a)
     except CliError as e:
         print(str(e), file=sys.stderr)
         return 1
@@ -46,3 +56,7 @@ def main(argv=None):
         # 这里不打 traceback：用户要的是那句原因，不是调用栈。
         print(f"\n错误：{e}", file=sys.stderr)
         return 2
+    # 清理放在这里而不是 run() 里：run() 也会被测试/外部脚本调用，
+    # 那些场景用的是共享的 database/ fixture，不能删。
+    clean_db(a)
+    return code

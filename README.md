@@ -334,7 +334,8 @@ K 线是整轮最慢的一步：服务端有频控（约 600~700 只/分钟）�
 | `KLINE_SPLIT_MIN` / `KLINE_SPLIT_DEPTH` | 10 / 3 | 丢码时拆批的最小粒度 / 最多拆几层 |
 | `KLINE_STALE_ROUNDS` / `KLINE_BACKOFF_BASE` / `KLINE_BACKOFF_MAX` | 5 / 5.0 / 40.0 | 收尾补取轮数 / 轮间退避基数与上限（秒） |
 | `KLINE_MAX_BARS` | 300 | 每只最多保留的 K 线根数（≈14 个月） |
-| `KLINE_KEEP` / `KLINE_WARN_FILES` | 2 / 4 | `--prune-kline` 保留份数 / 超过几份开始提示清理 |
+| `KLINE_KEEP` / `KLINE_WARN_FILES` | 2 / 4 | 清理时保留几份 K 线底稿 / 超过几份提示 |
+| `dbclean.KEEP_DAYS` | 14 | 清理时逐日缓存（cross/labels/mv/quote/result/finance*）保留天数 |
 | `CROSS_CACHE_VERSION` | 3 | 粗筛缓存签名版本，改 `CROSS_TPL` 必须 +1 |
 
 ---
@@ -448,7 +449,7 @@ v1.10 在末尾新增「总市值（亿）」列。历史 CSV 不自动回写：
 | `cross_<交易日>.json` | 横截面粗筛原始返回 |
 | `cross_<交易日>.meta.json` | 粗筛缓存签名（表达式 + 参数 + 版本），不是数据文件 |
 | `labels_<交易日>.json` | 排除集原始返回（ST + 次新分桶） |
-| `kline_<起>_<止>.json` | 日 K 线底稿（含底稿内全部代码）；下次运行以最新一份为底稿，只补新增交易日。单份约 65 MB，`--prune-kline` 可只留最新 2 份 |
+| `kline_<起>_<止>.json` | 日 K 线底稿（含底稿内全部代码）；下次运行以最新一份为底稿，只补新增交易日。单份约 65 MB，清理时只留最新 2 份 |
 | `mv_<交易日>.json` | 全市场流通/总市值 |
 | `quote_<基准日>.json` | 最终名单的行情快照 |
 | `finance_<基准日>.json` | 业绩转变①兜底用的利润表 |
@@ -458,6 +459,39 @@ v1.10 在末尾新增「总市值（亿）」列。历史 CSV 不自动回写：
 | `trading_calendar.json` | 交易日历缓存 |
 
 已有文件默认复用；`--refresh` 强制重新下载并覆盖。
+
+### 自动清理（v1.10，2026-11-12 起）
+
+`database/` 里没有最终产物（最终产物是 `csv_output/选股_<S>.csv`），全是中间缓存。
+为了不让它只增不减（每周约 +66 MB），**每次运行成功产出名单后会自动清理**：
+
+| 类型 | 保留规则 | 说明 |
+|---|---|---|
+| `kline_<起>_<止>.json` 底稿 | 最新 `KLINE_KEEP`（=2）份 | 新底稿是旧底稿的超集，删旧的不丢股票；留 2 份便于回滚一期 |
+| 逐日缓存 `cross_/labels_/mv_/quote_/result_/finance*` | 最近 `KEEP_DAYS`（=14）天 | 下次运行的 need 只有 5 个交易日；留 14 天够「重跑上一期」 |
+| 常驻文件 `trading_calendar / industry_map / gene_industry_map / history_meta` | **永不删** | 覆盖更新，体积固定 |
+| 认不出命名的文件 | **永不删** | 宁可留着也不误删 |
+
+稳态体积约 **140~150 MB**（底稿 2 份约 130 MB + 逐日缓存 14 天约 10 MB + 常驻约 2 MB）。
+
+安全约束：
+
+- 只在 `run()` **成功返回**后才清理 —— 取数失败、名单校验失败都不会走到这一步，
+  旧数据一定还在，重跑可直接复用；
+- 本次运行刚写的文件（mtime 10 分钟内）与显式 `protect` 的文件绝不删；
+- 删除失败只跳过、不中断；
+- 清理只是删文件，不改任何取数/选股逻辑，不影响名单。
+
+两个开关：
+
+```bash
+python3 kline_screen.py --clean-dry-run   # 只预演：打印将删哪些、释放多少，不真删
+python3 kline_screen.py --no-clean        # 本次不清理（想保住现场排查时用）
+```
+
+> ⚠️ 清理**不在** `pipeline.run()` 里，而在 `cli.main()` 里。因为 `run()` 也会被
+> `tests/test_e2e_replay.py` 等直接调用，那些场景用的是共享的真实 `database/`，
+> 在 `run()` 里删文件会把测试 fixture 删掉。
 
 ### `result_<基准日>.json` 的剔除字段
 
@@ -507,8 +541,9 @@ python3 kline_screen.py --refresh
 python3 kline_screen.py --n 2     # 每 3 个交易日
 python3 kline_screen.py --n 0     # 每个交易日
 
-# 底稿攒多了（每份约 65 MB）时顺手清理，只留最新 2 份
-python3 kline_screen.py --prune-kline
+# 底稿攒多了想手动清（默认每次跑完已自动清理，一般不用管）
+python3 kline_screen.py --clean-dry-run   # 先看会删哪些
+python3 kline_screen.py --prune-kline     # 兼容保留，等同默认清理
 ```
 
 主要参数：
@@ -525,7 +560,9 @@ python3 kline_screen.py --prune-kline
 | `--ma60-gap` | 启动日距 MA60 上限，`0` 表示关闭 |
 | `--refresh` | 忽略已有缓存，重新下载原始数据 |
 | `--refresh-industry` | 强制重建申万行业归属表（默认 30 天缓存，重建约 2~3 分钟） |
-| `--prune-kline` | 跑完后只保留最新 2 份 K 线底稿（每份约 65 MB）；默认只提示不删除 |
+| `--no-clean` | 本次不清理 `database/`（默认会自动清理，见上文「自动清理」） |
+| `--clean-dry-run` | 只预演清理、打印将删哪些文件，不真删也不跑选股 |
+| `--prune-kline` | 兼容保留；其功能已并入默认清理，不再需要 |
 
 ### 前向评估（evaluation/evaluate.py）
 
@@ -630,6 +667,7 @@ stock-kline-screen-tool/
 │   │   ├── session.py         收盘定稿判断 + 缓存定稿校验
 │   │   ├── storage.py         JSON/CSV 原子写
 │   │   ├── values.py          单位与日期工具
+│   │   ├── dbclean.py         database/ 自动清理（保留口径见该文件头注释）
 │   │   └── westock.py         CLI 调用 / markdown 解析 / 重试
 │   ├── datasources/           行情 / K线 / 行业 / 财务取数
 │   └── metrics/               换手 / 业绩转变
@@ -644,6 +682,7 @@ stock-kline-screen-tool/
 │   ├── test_screen.py         选股/下载核心纯函数测试
 │   ├── test_evaluate.py       评估纯函数测试
 │   ├── test_session.py        收盘定稿判断、缓存定稿校验与 K 线补取轮次
+│   ├── test_dbclean.py        database/ 自动清理的保留口径与安全性
 │   └── test_e2e_replay.py     端到端离线回放（有 database/ 缓存时自动启用）
 ├── README.md                  本文件（使用说明 + 规则说明）
 ├── CHANGELOG.md               修改记录
@@ -782,12 +821,16 @@ python3 kline_screen.py --date 2026-11-09
 
 ### 为什么 `database/` 越来越大？
 
+> **2026-11-12 起已修复**：现在每次运行成功后会自动清理，稳态约 140~150 MB，
+> 不再只增不减。下面是历史成因与手动处理方式，留作参考。
+
 `kline_<起>_<止>.json` 每跑一期新增一份（约 65 MB），十期就是 600 MB 以上。
-程序每期都会提示「可加 `--prune-kline`」，但默认**不删**任何文件——删数据是不可逆的。
-确认不需要回滚后执行：
+旧版本默认**不删**任何文件——删数据是不可逆的，所以只提示、要人确认。
+需要手动清理时：
 
 ```bash
-python3 kline_screen.py --prune-kline      # 只保留最新 2 份底稿
+python3 kline_screen.py --clean-dry-run    # 先预演，看会删哪些、释放多少
+python3 kline_screen.py                    # 正常跑一趟，跑完自动清理
 ```
 
 可以安全清理，是因为落盘时保留的是「底稿里的全部代码」而不是当期候选，
